@@ -1,0 +1,4806 @@
+"use client"
+
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react'
+
+import {
+  Background,
+  Controls,
+  ReactFlow,
+  addEdge,
+  applyEdgeChanges,
+  applyNodeChanges,
+  type EdgeChange,
+  type NodeChange,
+  type ReactFlowInstance,
+  type IsValidConnection,
+  type Connection,
+  type Edge,
+  type Node,
+} from '@xyflow/react'
+import { toast } from 'sonner'
+import {
+  CheckCircle2,
+  Copy,
+  Download,
+  Edit3,
+  ExternalLink,
+  Home,
+  Image as ImageIcon,
+  Images,
+  KeyRound,
+  Layers,
+  LogIn,
+  Loader2,
+  Menu,
+  Monitor,
+  Moon,
+  Plus,
+  RefreshCw,
+  Save,
+  ShoppingBag,
+  Sparkles,
+  Sun,
+  Terminal,
+  Trash2,
+  Upload,
+  Workflow,
+  X,
+} from 'lucide-react'
+import {
+  clearImages,
+  deleteImage,
+  exportBackup,
+  getSettings,
+  importBackup,
+  listImages,
+  listReferenceImageBlobs,
+  saveSettings,
+  saveImages,
+  saveReferenceImageBlobs,
+} from './storage'
+import { Button } from './components/ui/button'
+import { Badge } from './components/ui/badge'
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from './components/ui/card'
+import { Checkbox } from './components/ui/checkbox'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './components/ui/dialog'
+import { Input } from './components/ui/input'
+import { Label } from './components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './components/ui/select'
+import { Separator } from './components/ui/separator'
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarHeader,
+  SidebarInset,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+} from './components/ui/sidebar'
+import { Textarea } from './components/ui/textarea'
+import { bridge } from './bridge'
+import { commerceCategoryTree } from './commerceCategories'
+import {
+  GalleryStrip,
+  edgeTypes,
+  nodeTypes,
+  PROMPT_REFERENCE_HANDLE_IDS,
+  type AssetNodeData,
+  type BlueprintEdgeData,
+  type GenerateNodeData,
+  type PromptNodeData,
+} from './workflowNodes'
+import type {
+  ImageGenerationTask,
+  ImageGenerationTaskStatus,
+  LocalImageRecord,
+  ModelOption,
+  PromptOptimizationPreset,
+  ReferenceImage,
+  StyleOption,
+  ThemeMode,
+} from './types'
+
+const DEFAULT_BASE_URL = ''
+const DEFAULT_MODEL = 'gpt-image-2'
+const DEFAULT_TEXT_MODEL = 'gpt-5.5'
+const DEFAULT_PROMPT_OPTIMIZATION_PRESET: PromptOptimizationPreset = 'ecommerce'
+const GITHUB_REPO_URL = 'https://github.com/1093791954/image-tool'
+const MAX_COMMERCE_PRODUCT_IMAGES = 4
+const COMMERCE_REFERENCE_MAX_SIDE = 1600
+const COMMERCE_REFERENCE_JPEG_QUALITY = 0.86
+const COMMERCE_PRODUCT_SHEET_SIZE = 1600
+const CONFIGURATION_NOTICE_MESSAGE =
+  '请先在控制台补全生图 API Key 和模型，配置完成后再继续使用其他页面。'
+
+const CUSTOM_SIZE_VALUE = 'custom'
+const sizeOptions = [
+  { ratio: '1:1', value: '1024x1024', label: '方图' },
+  { ratio: '3:4', value: '1024x1365', label: '竖版海报' },
+  { ratio: '4:3', value: '1365x1024', label: '横版构图' },
+  { ratio: '16:9', value: '1536x864', label: '宽屏封面' },
+  { ratio: '9:16', value: '864x1536', label: '手机竖屏' },
+  { ratio: '2:3', value: '1024x1536', label: '竖版生成' },
+  { ratio: '3:2', value: '1536x1024', label: '横版生成' },
+  { ratio: '4:5', value: '1024x1280', label: '社媒竖图' },
+  { ratio: '5:4', value: '1280x1024', label: '产品横图' },
+  { ratio: '4:7', value: '1024x1792', label: '长竖图' },
+  { ratio: '7:4', value: '1792x1024', label: '超宽图' },
+]
+const sizes = sizeOptions.map((item) => item.value)
+const qualities = ['auto', 'standard', 'hd', 'low', 'medium', 'high']
+const counts = [1, 2, 3, 4]
+const inputFidelities = ['low', 'high'] as const
+const themeOptions: Array<{ value: ThemeMode; label: string; icon: typeof Sun }> = [
+  { value: 'light', label: '亮色', icon: Sun },
+  { value: 'dark', label: '暗色', icon: Moon },
+  { value: 'system', label: '跟随系统', icon: Monitor },
+]
+const promptOptimizationPresets: Array<{ value: PromptOptimizationPreset; label: string }> = [
+  { value: 'ecommerce', label: '电商卖货' },
+  { value: 'product', label: '产品质感' },
+  { value: 'social', label: '社媒爆款' },
+  { value: 'brand', label: '品牌海报' },
+  { value: 'character', label: 'IP/角色' },
+  { value: 'general', label: '通用增强' },
+]
+
+function parseSizeValue(value: string) {
+  const match = value.trim().match(/^(\d{2,5})x(\d{2,5})$/)
+  if (!match) return null
+  return {
+    width: Number(match[1]),
+    height: Number(match[2]),
+  }
+}
+
+function sizeOptionLabel(option: (typeof sizeOptions)[number]) {
+  return `${option.ratio} · ${option.value} · ${option.label}`
+}
+
+function buildCommerceMainPrompt(description: string, categoryPath = '') {
+  const trimmedDescription = description.trim() || '用户未填写额外文字描述。'
+  const trimmedCategoryPath = categoryPath.trim() || '用户未选择商品品类。'
+  return [
+    '你是一名资深电商视觉设计师，请基于参考图生成一张电商商品主图。',
+    `商品品类：${trimmedCategoryPath}。该品类是强约束，如果图像识别结果和用户选择的品类冲突，优先按用户选择的品类理解商品。`,
+    '参考图中的商品白底图是商品主体依据，必须保持商品外观、结构、颜色、材质和关键细节真实一致，不要改变商品本身。',
+    '目标风格图只用于迁移构图节奏、光线氛围、背景质感、色彩倾向和视觉高级感，不要复制风格图中的商品或品牌元素。',
+    '根据目标风格图完成商品替换；如果风格图中有文字，只在用户描述提供明确文案时选择性替换，否则去除或弱化原图文字。',
+    `商品信息和主图诉求：${trimmedDescription}`,
+    '画面要求：主体清晰醒目，构图稳定，适合电商列表首图；背景干净但有质感，光影自然，边缘干净，产品比例合理。',
+    '不要生成无关文字、水印、Logo、价格、二维码或平台界面元素。输出应像真实商业摄影和精修后的电商主图。',
+  ].join('\n')
+}
+
+function buildCommerceDetailPrompt(description: string, categoryPath = '') {
+  const trimmedDescription = description.trim() || '用户未填写额外文字描述。'
+  const trimmedCategoryPath = categoryPath.trim() || '用户未选择商品品类。'
+  return [
+    '你是一名资深电商详情页视觉设计师，请基于参考图生成一张商品详情图。',
+    `商品品类：${trimmedCategoryPath}。该品类是强约束，如果图像识别结果和用户选择的品类冲突，优先按用户选择的品类理解商品。`,
+    '参考图中的商品白底图是商品主体依据，必须保持商品外观、结构、包装、颜色、材质和关键细节真实一致，不要改变商品本身。',
+    '目标详情风格图只用于迁移详情页版式、分区节奏、背景质感、光线氛围、色彩倾向、道具关系和文字排版，不要复制风格图中的商品或品牌元素。',
+    '画面应像电商详情页中的一屏核心卖点图：有清晰主视觉、短卖点文案、局部细节或场景辅助展示，层级清楚，适合用户继续向下浏览。',
+    `商品信息和详情图诉求：${trimmedDescription}`,
+    '文字只使用用户明确提供的短句，按目标风格图的文字区域选择性排版；没有足够文案时减少文字，不要编造品牌、功效、认证、价格、二维码或平台界面元素。',
+    '输出应像真实商业精修后的电商详情图，干净、高级、信息明确，避免长段文字、低清、错字、水印和无关 Logo。',
+  ].join('\n')
+}
+
+function buildCommerceEditPrompt(prompt: string, productImageCount: number, kind: 'main' | 'detail') {
+  if (productImageCount <= 1) return prompt
+  const styleLabel = kind === 'detail' ? '目标详情风格图' : '目标风格图'
+  return [
+    '【参考图输入说明】',
+    `第一张参考图是同一商品的 ${productImageCount} 个白底角度合成参考板，用于理解商品真实外观、结构、包装文字、材质和细节。`,
+    `第二张参考图是${styleLabel}，用于迁移构图、背景、光影、色彩、版式层级和画面氛围。`,
+    '生成时不要保留参考板的拼图排版、边框或分隔线，只提取商品主体并替换到目标风格图对应位置。',
+    '',
+    prompt,
+  ].join('\n')
+}
+
+type WorkflowNode = Node<
+  Record<string, unknown>,
+  WorkflowNodeType
+>
+
+type WorkflowNodeType = 'asset' | 'prompt' | 'style' | 'generate'
+type WorkflowEdge = Edge<Partial<BlueprintEdgeData>, 'blueprint'>
+type PromptReferenceImage = ReferenceImage & { aliases?: string[] }
+
+type PaneMenu = {
+  x: number
+  y: number
+  position: { x: number; y: number }
+} | null
+
+type AppView = 'home' | 'commerce' | 'console' | 'gallery' | 'workflow'
+
+type WorkflowCanvas = {
+  id: string
+  name: string
+  updatedAt: number
+  nodes: WorkflowNode[]
+  edges: WorkflowEdge[]
+  prompt: string
+  promptOptimizationPreset: PromptOptimizationPreset
+  generationMode: 'text' | 'image'
+  referenceImages: ReferenceImage[]
+  latestImageId?: string
+  generationTaskId?: string
+  generationTaskStatus?: ImageGenerationTaskStatus
+  generationTaskUpdatedAt?: number
+}
+
+type WorkflowHistoryEntry = {
+  canvasId: string
+  snapshot: WorkflowCanvas
+}
+
+type WorkflowNodeDataMap = Record<string, WorkflowNode['data']>
+
+type PendingGenerationTaskRecord = {
+  taskId: string
+  prompt: string
+  model: string
+  size: string
+  quality: string
+  mode: 'text' | 'image'
+  referenceImageNames?: string[]
+  canvasId?: string
+  generateNodeId?: string
+  createdAt: number
+  status?: ImageGenerationTaskStatus
+  updatedAt?: number
+}
+
+type StateUpdater<T> = T | ((current: T) => T)
+
+const WORKFLOW_CANVASES_STORAGE_KEY = 'gpt-image-tools.workflow-canvases.v1'
+const ACTIVE_CANVAS_STORAGE_KEY = 'gpt-image-tools.active-canvas.v1'
+const PENDING_GENERATION_TASKS_STORAGE_KEY = 'gpt-image-tools.pending-generation-tasks.v1'
+const WORKFLOW_HISTORY_LIMIT = 80
+const WORKFLOW_STORAGE_SAVE_DELAY_MS = 260
+const WORKFLOW_BLOB_SAVE_DELAY_MS = 420
+const WORKFLOW_HISTORY_PUSH_DELAY_MS = 220
+
+const initialWorkflowNodes: WorkflowNode[] = [
+  { id: 'asset-1', type: 'asset', position: { x: -520, y: -130 }, data: {} },
+  { id: 'prompt-1', type: 'prompt', position: { x: -520, y: 255 }, data: {} },
+  { id: 'generate-1', type: 'generate', position: { x: 25, y: 45 }, data: {} },
+]
+
+const initialWorkflowEdges: WorkflowEdge[] = [
+  {
+    id: 'asset-1-prompt-1',
+    type: 'blueprint',
+    source: 'asset-1',
+    target: 'prompt-1',
+    sourceHandle: 'reference',
+    targetHandle: 'reference-1',
+    className: 'edge-blue',
+    data: { label: '参考图 -> 文字描述' },
+  },
+  {
+    id: 'prompt-1-generate-1',
+    type: 'blueprint',
+    source: 'prompt-1',
+    target: 'generate-1',
+    sourceHandle: 'prompt',
+    targetHandle: 'prompt',
+    animated: true,
+    className: 'edge-violet',
+    data: { label: '提示词 -> 图片生成' },
+  },
+]
+
+function resolveUpdater<T>(updater: StateUpdater<T>, current: T): T {
+  return typeof updater === 'function'
+    ? (updater as (currentValue: T) => T)(current)
+    : updater
+}
+
+function createLocalId(prefix: string) {
+  const randomId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2)
+
+  return `${prefix}-${Date.now()}-${randomId}`
+}
+
+function getWorkflowNodeReferenceImages(node?: Pick<WorkflowNode, 'data'> | null) {
+  const value = node?.data?.referenceImages
+  return Array.isArray(value) ? ensureReferenceTitles(value as ReferenceImage[]).slice(0, 1) : []
+}
+
+function normalizeAssetNodeReferenceImages(images: ReferenceImage[]) {
+  return ensureReferenceTitles(images).slice(0, 1)
+}
+
+function getWorkflowNodeSelectedStyleId(node?: Pick<WorkflowNode, 'data'> | null) {
+  const value = node?.data?.selectedStyleId
+  return typeof value === 'string' ? value : ''
+}
+
+function getWorkflowNodePrompt(node?: Pick<WorkflowNode, 'data'> | null) {
+  const value = node?.data?.prompt
+  return typeof value === 'string' ? value : ''
+}
+
+function getWorkflowNodePromptOptimizationPreset(node?: Pick<WorkflowNode, 'data'> | null) {
+  return normalizePromptOptimizationPreset(node?.data?.promptOptimizationPreset)
+}
+
+function getWorkflowNodeLatestImageId(node?: Pick<WorkflowNode, 'data'> | null) {
+  const value = node?.data?.latestImageId
+  return typeof value === 'string' ? value : ''
+}
+
+function getWorkflowNodeCustomOutputTitle(node?: Pick<WorkflowNode, 'data'> | null) {
+  const value = node?.data?.outputTitle
+  return typeof value === 'string' ? normalizeReferenceTitle(value) : ''
+}
+
+function defaultGenerateOutputTitle(nodeId: string) {
+  return normalizeReferenceTitle(`生成图-${nodeId}`) || '生成图'
+}
+
+function getWorkflowNodeOutputTitle(node: Pick<WorkflowNode, 'id' | 'data'>) {
+  return getWorkflowNodeCustomOutputTitle(node) || defaultGenerateOutputTitle(node.id)
+}
+
+function promptReferencePortTitle(handleId = '') {
+  const referenceIndex = PROMPT_REFERENCE_HANDLE_IDS.indexOf(handleId)
+  if (referenceIndex >= 0) return `参考图输入 ${referenceIndex + 1}`
+  if (handleId === 'reference') return '参考图输入'
+  return ''
+}
+
+function workflowNodeDataForStorage(node: WorkflowNode) {
+  if (node.type === 'asset') {
+    const referenceImages = getWorkflowNodeReferenceImages(node).map(stripReferenceImageDataUrl)
+    return referenceImages.length > 0 ? { referenceImages } : {}
+  }
+  if (node.type === 'style') {
+    const selectedStyleId = getWorkflowNodeSelectedStyleId(node)
+    return selectedStyleId ? { selectedStyleId } : {}
+  }
+  if (node.type === 'prompt') {
+    const prompt = getWorkflowNodePrompt(node)
+    const promptOptimizationPreset = getWorkflowNodePromptOptimizationPreset(node)
+    return {
+      ...(prompt ? { prompt } : {}),
+      ...(promptOptimizationPreset !== DEFAULT_PROMPT_OPTIMIZATION_PRESET
+        ? { promptOptimizationPreset }
+        : {}),
+    }
+  }
+  if (node.type === 'generate') {
+    const latestImageId = getWorkflowNodeLatestImageId(node)
+    const outputTitle = getWorkflowNodeCustomOutputTitle(node)
+    return {
+      ...(latestImageId ? { latestImageId } : {}),
+      ...(outputTitle ? { outputTitle } : {}),
+    }
+  }
+  return {}
+}
+
+function stripReferenceImageDataUrl(image: ReferenceImage): Omit<ReferenceImage, 'dataUrl'> {
+  const { dataUrl: _dataUrl, ...rest } = image
+  return rest
+}
+
+function serializeWorkflowCanvases(canvases: WorkflowCanvas[]) {
+  return canvases.map((canvas) => ({
+    ...canvas,
+    nodes: canvas.nodes.map((node) => {
+      return {
+        ...node,
+        data: workflowNodeDataForStorage(node),
+      }
+    }),
+  }))
+}
+
+function extractReferenceImageBlobs(canvases: WorkflowCanvas[]) {
+  const records: Array<{ id: string; dataUrl: string }> = []
+
+  canvases.forEach((canvas) => {
+    canvas.nodes.forEach((node) => {
+      if (node.type !== 'asset') return
+      getWorkflowNodeReferenceImages(node).forEach((image) => {
+        if (!image.dataUrl) return
+        records.push({ id: image.id, dataUrl: image.dataUrl })
+      })
+    })
+  })
+
+  return records
+}
+
+function hydrateWorkflowCanvases(
+  canvases: WorkflowCanvas[],
+  blobs: Array<{ id: string; dataUrl: string }>
+) {
+  if (blobs.length === 0) return canvases
+
+  const blobById = new Map(blobs.map((blob) => [blob.id, blob.dataUrl]))
+
+  return canvases.map((canvas) => ({
+    ...canvas,
+    nodes: canvas.nodes.map((node) => {
+      if (node.type !== 'asset') return node
+
+      const referenceImages = getWorkflowNodeReferenceImages(node).map((image) => ({
+        ...image,
+        dataUrl: image.dataUrl || blobById.get(image.id) || '',
+      }))
+
+      return {
+        ...node,
+        data: referenceImages.length > 0 ? { referenceImages } : {},
+      }
+    }),
+  }))
+}
+
+function cloneWorkflowNodes(
+  nodes: WorkflowNode[],
+  legacyReferenceImages: ReferenceImage[] = [],
+  legacyPrompt = '',
+  legacyPromptOptimizationPreset: PromptOptimizationPreset = DEFAULT_PROMPT_OPTIMIZATION_PRESET
+) {
+  const normalizedLegacyReferenceImages = ensureReferenceTitles(legacyReferenceImages)
+  let hasStoredAssetReferences = false
+  let hasStoredPrompt = false
+  let hasStoredPromptOptimizationPreset = false
+  let firstPromptIndex = -1
+
+  const clonedNodes = nodes.map((node, index) => {
+    let data: Record<string, unknown> = {}
+
+    if (node.type === 'asset') {
+      const referenceImages = normalizeAssetNodeReferenceImages(getWorkflowNodeReferenceImages(node))
+      if (referenceImages.length > 0) {
+        hasStoredAssetReferences = true
+        data = { referenceImages }
+      }
+    } else if (node.type === 'style') {
+      const selectedStyleId = getWorkflowNodeSelectedStyleId(node)
+      data = selectedStyleId ? { selectedStyleId } : {}
+    } else if (node.type === 'prompt') {
+      if (firstPromptIndex < 0) firstPromptIndex = index
+      const prompt = getWorkflowNodePrompt(node)
+      const promptOptimizationPreset = getWorkflowNodePromptOptimizationPreset(node)
+      if (prompt) hasStoredPrompt = true
+      if (promptOptimizationPreset !== DEFAULT_PROMPT_OPTIMIZATION_PRESET) {
+        hasStoredPromptOptimizationPreset = true
+      }
+      data = {
+        ...(prompt ? { prompt } : {}),
+        ...(promptOptimizationPreset !== DEFAULT_PROMPT_OPTIMIZATION_PRESET
+          ? { promptOptimizationPreset }
+          : {}),
+      }
+    } else if (node.type === 'generate') {
+      const latestImageId = getWorkflowNodeLatestImageId(node)
+      const outputTitle = getWorkflowNodeCustomOutputTitle(node)
+      data = {
+        ...(latestImageId ? { latestImageId } : {}),
+        ...(outputTitle ? { outputTitle } : {}),
+      }
+    }
+
+    return {
+      ...node,
+      position: { ...node.position },
+      data,
+    }
+  })
+
+  if (
+    firstPromptIndex >= 0 &&
+    (legacyPrompt || legacyPromptOptimizationPreset !== DEFAULT_PROMPT_OPTIMIZATION_PRESET)
+  ) {
+    clonedNodes[firstPromptIndex] = {
+      ...clonedNodes[firstPromptIndex],
+      data: {
+        ...clonedNodes[firstPromptIndex].data,
+        ...(!hasStoredPrompt && legacyPrompt ? { prompt: legacyPrompt } : {}),
+        ...(!hasStoredPromptOptimizationPreset &&
+        legacyPromptOptimizationPreset !== DEFAULT_PROMPT_OPTIMIZATION_PRESET
+          ? { promptOptimizationPreset: legacyPromptOptimizationPreset }
+          : {}),
+      },
+    }
+  }
+
+  if (normalizedLegacyReferenceImages.length > 0 && !hasStoredAssetReferences) {
+    const assetIndices = clonedNodes
+      .map((node, index) => (node.type === 'asset' ? index : -1))
+      .filter((index) => index >= 0)
+
+    assetIndices.forEach((assetIndex, index) => {
+      const image = normalizedLegacyReferenceImages[index]
+      if (!image) return
+
+      clonedNodes[assetIndex] = {
+        ...clonedNodes[assetIndex],
+        data: { referenceImages: [image] },
+      }
+    })
+  }
+
+  return clonedNodes
+}
+
+function cloneWorkflowEdges(edges: WorkflowEdge[]) {
+  return edges.map((edge) => ({
+    ...edge,
+    data: { ...edge.data },
+  }))
+}
+
+function isCanvasGenerating(canvas: WorkflowCanvas) {
+  return canvas.generationTaskStatus === 'queued' || canvas.generationTaskStatus === 'running'
+}
+
+function normalizeReferenceTitle(value: string) {
+  return value
+    .trim()
+    .replace(/^@+/, '')
+    .replace(/\.[^.]+$/, '')
+    .replace(/\s+/g, '-')
+    .replace(/[，。,.!！?？;；:：、()[\]{}<>《》"'“”‘’]/g, '')
+    .slice(0, 24)
+}
+
+function referenceTitleFromFileName(name: string, index: number) {
+  return normalizeReferenceTitle(name) || `参考图${index + 1}`
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function ensureReferenceTitles(images: ReferenceImage[]) {
+  return images.map((image, index) => ({
+    ...image,
+    title: normalizeReferenceTitle(image.title || image.name) || `参考图${index + 1}`,
+  }))
+}
+
+function referenceTitleKey(title: string) {
+  return normalizeReferenceTitle(title).toLocaleLowerCase()
+}
+
+function referenceImageOwnerId(imageId: string) {
+  return `asset:${imageId}`
+}
+
+function generateOutputOwnerId(nodeId: string) {
+  return `generate:${nodeId}`
+}
+
+function createUniqueReferenceTitle(baseTitle: string, entries: Array<{ title: string }>) {
+  const normalizedBase = normalizeReferenceTitle(baseTitle) || '图片'
+  const usedKeys = new Set(entries.map((entry) => referenceTitleKey(entry.title)).filter(Boolean))
+  if (!usedKeys.has(referenceTitleKey(normalizedBase))) return normalizedBase
+
+  for (let index = 2; index < 1000; index += 1) {
+    const suffix = `-${index}`
+    const candidate = `${normalizedBase.slice(0, Math.max(1, 24 - suffix.length))}${suffix}`
+    if (candidate && !usedKeys.has(referenceTitleKey(candidate))) return candidate
+  }
+
+  const suffix = `-${Date.now()}`
+  return `${normalizedBase.slice(0, Math.max(1, 24 - suffix.length))}${suffix}`
+}
+
+function getCanvasReferenceNameEntries(canvas?: Pick<WorkflowCanvas, 'nodes'> | null) {
+  if (!canvas) return []
+
+  const entries: Array<{
+    ownerId: string
+    nodeId: string
+    kind: 'asset' | 'generate'
+    title: string
+  }> = []
+
+  canvas.nodes.forEach((node) => {
+    if (node.type === 'asset') {
+      getWorkflowNodeReferenceImages(node).forEach((image) => {
+        const title = normalizeReferenceTitle(image.title || image.name)
+        if (!title) return
+        entries.push({
+          ownerId: referenceImageOwnerId(image.id),
+          nodeId: node.id,
+          kind: 'asset',
+          title,
+        })
+      })
+      return
+    }
+
+    if (node.type === 'generate') {
+      entries.push({
+        ownerId: generateOutputOwnerId(node.id),
+        nodeId: node.id,
+        kind: 'generate',
+        title: getWorkflowNodeOutputTitle(node),
+      })
+    }
+  })
+
+  return entries
+}
+
+function isReferenceTitleTaken(
+  canvas: Pick<WorkflowCanvas, 'nodes'> | null | undefined,
+  title: string,
+  ownerId: string
+) {
+  const key = referenceTitleKey(title)
+  if (!key) return false
+  return getCanvasReferenceNameEntries(canvas).some(
+    (entry) => entry.ownerId !== ownerId && referenceTitleKey(entry.title) === key
+  )
+}
+
+function getDuplicateCanvasReferenceTitles(canvas?: Pick<WorkflowCanvas, 'nodes'> | null) {
+  const seen = new Map<string, string>()
+  const duplicates = new Set<string>()
+
+  getCanvasReferenceNameEntries(canvas).forEach((entry) => {
+    const key = referenceTitleKey(entry.title)
+    if (!key) return
+    const existing = seen.get(key)
+    if (existing) duplicates.add(existing)
+    else seen.set(key, entry.title)
+  })
+
+  return [...duplicates]
+}
+
+function getCanvasReferenceImages(canvas?: Pick<WorkflowCanvas, 'nodes'> | null) {
+  if (!canvas) return []
+
+  const seen = new Set<string>()
+  const images: ReferenceImage[] = []
+  canvas.nodes.forEach((node) => {
+    if (node.type !== 'asset') return
+    getWorkflowNodeReferenceImages(node).forEach((image) => {
+      if (seen.has(image.id)) return
+      seen.add(image.id)
+      images.push(image)
+    })
+  })
+
+  return images
+}
+
+function getPromptAssetReferenceImages(
+  promptNodeId: string,
+  canvas: Pick<WorkflowCanvas, 'nodes' | 'edges'> | null | undefined
+) {
+  if (!canvas) return []
+
+  const assetEdges = canvas.edges.filter(
+    (edge) =>
+      edge.target === promptNodeId &&
+      edge.sourceHandle === 'reference' &&
+      (edge.targetHandle === 'reference' || edge.targetHandle?.startsWith('reference-')) &&
+      canvas.nodes.find((node) => node.id === edge.source)?.type === 'asset'
+  )
+
+  const seen = new Set<string>()
+  const images: PromptReferenceImage[] = []
+  assetEdges.forEach((edge) => {
+    const node = canvas.nodes.find((item) => item.id === edge.source && item.type === 'asset')
+    if (!node) return
+    const portTitle = promptReferencePortTitle(edge.targetHandle || '')
+    getWorkflowNodeReferenceImages(node).forEach((image) => {
+      if (seen.has(image.id)) return
+      seen.add(image.id)
+      images.push({
+        ...image,
+        aliases: portTitle ? [portTitle] : [],
+      })
+    })
+  })
+
+  return images
+}
+
+function getPromptGeneratedReferenceImages(
+  promptNodeId: string,
+  canvas: Pick<WorkflowCanvas, 'nodes' | 'edges'> | null | undefined,
+  images: LocalImageRecord[]
+): PromptReferenceImage[] {
+  if (!canvas) return []
+
+  const generateEdges = canvas.edges.filter(
+    (edge) =>
+      edge.target === promptNodeId &&
+      edge.sourceHandle === 'generated-image' &&
+      (edge.targetHandle === 'reference' || edge.targetHandle?.startsWith('reference-')) &&
+      canvas.nodes.find((node) => node.id === edge.source)?.type === 'generate'
+  )
+
+  return generateEdges
+    .map((edge) => {
+      const sourceNode = canvas.nodes.find((item) => item.id === edge.source && item.type === 'generate')
+      if (!sourceNode) return null
+      const portTitle = promptReferencePortTitle(edge.targetHandle || '')
+      const title = getWorkflowNodeOutputTitle(sourceNode)
+      const latestImage = images.find((image) => image.id === getWorkflowNodeLatestImageId(sourceNode))
+      return {
+        id: `generated-${sourceNode.id}`,
+        name: `${title}.png`,
+        title,
+        type: 'image/png',
+        dataUrl: latestImage?.src || '',
+        aliases: portTitle ? [portTitle] : [],
+      } satisfies PromptReferenceImage
+    })
+    .filter((image): image is NonNullable<typeof image> => Boolean(image))
+}
+
+function getPromptMentionReferenceImages(
+  promptNodeId: string,
+  canvas: Pick<WorkflowCanvas, 'nodes' | 'edges'> | null | undefined,
+  images: LocalImageRecord[]
+): PromptReferenceImage[] {
+  return [
+    ...getPromptAssetReferenceImages(promptNodeId, canvas),
+    ...getPromptGeneratedReferenceImages(promptNodeId, canvas, images),
+  ]
+}
+
+function getCanvasSelectedStyleIds(canvas?: Pick<WorkflowCanvas, 'nodes' | 'edges'> | null) {
+  if (!canvas) return []
+  const styleNodeIds = new Set(
+    canvas.nodes.filter((node) => node.type === 'style').map((node) => node.id)
+  )
+  const connectedStyleNodeIds = new Set(
+    canvas.edges
+      .filter(
+        (edge) =>
+          edge.sourceHandle === 'style' &&
+          edge.targetHandle === 'style' &&
+          styleNodeIds.has(edge.source)
+      )
+      .map((edge) => edge.source)
+  )
+  const scopedNodeIds = connectedStyleNodeIds.size > 0 ? connectedStyleNodeIds : styleNodeIds
+  const selectedIds: string[] = []
+  canvas.nodes.forEach((node) => {
+    if (node.type !== 'style' || !scopedNodeIds.has(node.id)) return
+    const selectedStyleId = getWorkflowNodeSelectedStyleId(node)
+    if (selectedStyleId && !selectedIds.includes(selectedStyleId)) selectedIds.push(selectedStyleId)
+  })
+  return selectedIds
+}
+
+function getPromptSelectedStyleIds(
+  promptNodeId: string,
+  canvas?: Pick<WorkflowCanvas, 'nodes' | 'edges'> | null
+) {
+  if (!canvas) return []
+  const connectedStyleNodeIds = new Set(
+    canvas.edges
+      .filter(
+        (edge) =>
+          edge.target === promptNodeId &&
+          edge.sourceHandle === 'style' &&
+          edge.targetHandle === 'style'
+      )
+      .map((edge) => edge.source)
+  )
+  if (connectedStyleNodeIds.size === 0) return getCanvasSelectedStyleIds(canvas)
+
+  const selectedIds: string[] = []
+  canvas.nodes.forEach((node) => {
+    if (node.type !== 'style' || !connectedStyleNodeIds.has(node.id)) return
+    const selectedStyleId = getWorkflowNodeSelectedStyleId(node)
+    if (selectedStyleId && !selectedIds.includes(selectedStyleId)) selectedIds.push(selectedStyleId)
+  })
+  return selectedIds
+}
+
+function normalizeWorkflowEdges(edges: WorkflowEdge[], nodes: WorkflowNode[]) {
+  const promptNode = nodes.find((node) => node.type === 'prompt')
+  const seen = new Set<string>()
+  const normalizedEdges: WorkflowEdge[] = []
+
+  edges.forEach((edge) => {
+    let nextEdge = { ...edge, data: { ...edge.data } }
+
+    if (
+      nextEdge.sourceHandle === 'reference' &&
+      nextEdge.targetHandle === 'image' &&
+      promptNode
+    ) {
+      nextEdge = {
+        ...nextEdge,
+        id: `${nextEdge.source}-reference-${promptNode.id}-reference`,
+        target: promptNode.id,
+        targetHandle: PROMPT_REFERENCE_HANDLE_IDS[0] || 'reference-1',
+        className: 'edge-blue',
+        data: { ...nextEdge.data, label: '参考图 -> 文字描述' },
+      }
+    }
+
+    if (
+      nextEdge.sourceHandle === 'reference' &&
+      nextEdge.targetHandle === 'reference' &&
+      promptNode
+    ) {
+      nextEdge = {
+        ...nextEdge,
+        target: promptNode.id,
+        targetHandle: PROMPT_REFERENCE_HANDLE_IDS[0] || 'reference-1',
+        className: 'edge-blue',
+        data: { ...nextEdge.data, label: '参考图 -> 文字描述' },
+      }
+    }
+
+    if (nextEdge.targetHandle === 'image') return
+
+    const key = `${nextEdge.source}-${nextEdge.sourceHandle}-${nextEdge.target}-${nextEdge.targetHandle}`
+    if (seen.has(key)) return
+    seen.add(key)
+    normalizedEdges.push(nextEdge)
+  })
+
+  return normalizedEdges
+}
+
+function normalizePromptOptimizationPreset(value: unknown): PromptOptimizationPreset {
+  return promptOptimizationPresets.some((preset) => preset.value === value)
+    ? (value as PromptOptimizationPreset)
+    : DEFAULT_PROMPT_OPTIMIZATION_PRESET
+}
+
+function createWorkflowCanvas(index: number, base?: WorkflowCanvas): WorkflowCanvas {
+  const id = createLocalId('canvas')
+  const now = Date.now()
+  const baseNodes = cloneWorkflowNodes(
+    base?.nodes || initialWorkflowNodes,
+    base?.referenceImages || [],
+    base?.prompt || '',
+    base?.promptOptimizationPreset || DEFAULT_PROMPT_OPTIMIZATION_PRESET
+  )
+
+  return {
+    id,
+    name: base ? `${base.name} 副本` : `画布 ${index}`,
+    updatedAt: now,
+    nodes: baseNodes,
+    edges: normalizeWorkflowEdges(
+      cloneWorkflowEdges(base?.edges || initialWorkflowEdges),
+      baseNodes
+    ),
+    prompt: base?.prompt || '',
+    promptOptimizationPreset: base?.promptOptimizationPreset || DEFAULT_PROMPT_OPTIMIZATION_PRESET,
+    generationMode: base?.generationMode || 'text',
+    referenceImages: [],
+    latestImageId: base?.latestImageId,
+  }
+}
+
+function normalizeStoredCanvases(value: unknown): WorkflowCanvas[] {
+  if (!Array.isArray(value)) return []
+
+  const canvases: WorkflowCanvas[] = []
+
+  value.forEach((item, index) => {
+    if (!item || typeof item !== 'object') return
+    const canvas = item as Partial<WorkflowCanvas>
+    if (typeof canvas.id !== 'string' || typeof canvas.name !== 'string') return
+
+    const legacyReferenceImages = Array.isArray(canvas.referenceImages)
+      ? ensureReferenceTitles(canvas.referenceImages as ReferenceImage[])
+      : []
+    const normalizedNodes = Array.isArray(canvas.nodes)
+      ? cloneWorkflowNodes(
+          canvas.nodes as WorkflowNode[],
+          legacyReferenceImages,
+          typeof canvas.prompt === 'string' ? canvas.prompt : '',
+          normalizePromptOptimizationPreset(canvas.promptOptimizationPreset)
+        )
+      : cloneWorkflowNodes(
+          initialWorkflowNodes,
+          legacyReferenceImages,
+          typeof canvas.prompt === 'string' ? canvas.prompt : '',
+          normalizePromptOptimizationPreset(canvas.promptOptimizationPreset)
+        )
+    const rawEdges = Array.isArray(canvas.edges)
+      ? cloneWorkflowEdges(canvas.edges as WorkflowEdge[])
+      : cloneWorkflowEdges(initialWorkflowEdges)
+
+    canvases.push({
+      id: canvas.id,
+      name: canvas.name || `画布 ${index + 1}`,
+      updatedAt: typeof canvas.updatedAt === 'number' ? canvas.updatedAt : Date.now(),
+      nodes: normalizedNodes,
+      edges: normalizeWorkflowEdges(rawEdges, normalizedNodes),
+      prompt: typeof canvas.prompt === 'string' ? canvas.prompt : '',
+      promptOptimizationPreset: normalizePromptOptimizationPreset(
+        canvas.promptOptimizationPreset
+      ),
+      generationMode: canvas.generationMode === 'image' ? 'image' : 'text',
+      referenceImages: [],
+      latestImageId:
+        typeof canvas.latestImageId === 'string' ? canvas.latestImageId : undefined,
+      generationTaskId:
+        typeof canvas.generationTaskId === 'string' ? canvas.generationTaskId : undefined,
+      generationTaskStatus:
+        canvas.generationTaskStatus === 'queued' ||
+        canvas.generationTaskStatus === 'running' ||
+        canvas.generationTaskStatus === 'completed' ||
+        canvas.generationTaskStatus === 'failed' ||
+        canvas.generationTaskStatus === 'expired'
+          ? canvas.generationTaskStatus
+          : undefined,
+      generationTaskUpdatedAt:
+        typeof canvas.generationTaskUpdatedAt === 'number'
+          ? canvas.generationTaskUpdatedAt
+          : undefined,
+    })
+  })
+
+  return canvases
+}
+
+function loadWorkflowCanvases() {
+  try {
+    const raw = window.localStorage.getItem(WORKFLOW_CANVASES_STORAGE_KEY)
+    const stored = raw ? normalizeStoredCanvases(JSON.parse(raw)) : []
+    const baseCanvases = stored.length > 0 ? stored : [createWorkflowCanvas(1)]
+    return reconcileCanvasGenerationState(baseCanvases, loadPendingGenerationTasks())
+  } catch {
+    return [createWorkflowCanvas(1)]
+  }
+}
+
+function loadActiveCanvasId() {
+  try {
+    return window.localStorage.getItem(ACTIVE_CANVAS_STORAGE_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+function cloneWorkflowCanvasSnapshot(canvas: WorkflowCanvas): WorkflowCanvas {
+  return JSON.parse(JSON.stringify(canvas)) as WorkflowCanvas
+}
+
+function areNodePositionsSame(left: WorkflowNode[], right: WorkflowNode[]) {
+  if (left.length !== right.length) return false
+  return left.every((node, index) => {
+    const other = right[index]
+    return (
+      other &&
+      node.id === other.id &&
+      node.position.x === other.position.x &&
+      node.position.y === other.position.y
+    )
+  })
+}
+
+function areReferenceImagesEqual(left: ReferenceImage[], right: ReferenceImage[]) {
+  if (left.length !== right.length) return false
+  return left.every((image, index) => {
+    const other = right[index]
+    return (
+      other &&
+      image.id === other.id &&
+      image.name === other.name &&
+      image.title === other.title &&
+      image.type === other.type &&
+      image.dataUrl === other.dataUrl
+    )
+  })
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false
+  const tagName = target.tagName
+  return (
+    target.isContentEditable ||
+    tagName === 'INPUT' ||
+    tagName === 'TEXTAREA' ||
+    tagName === 'SELECT'
+  )
+}
+
+function loadPendingGenerationTasks() {
+  try {
+    const raw = window.localStorage.getItem(PENDING_GENERATION_TASKS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((item): item is PendingGenerationTaskRecord => {
+      return (
+        item &&
+        typeof item === 'object' &&
+        typeof item.taskId === 'string' &&
+        typeof item.prompt === 'string' &&
+        typeof item.model === 'string' &&
+        typeof item.size === 'string' &&
+        typeof item.quality === 'string' &&
+        (item.mode === 'text' || item.mode === 'image') &&
+        typeof item.createdAt === 'number'
+      )
+    })
+  } catch {
+    return []
+  }
+}
+
+function reconcileCanvasGenerationState(
+  canvases: WorkflowCanvas[],
+  tasks: PendingGenerationTaskRecord[]
+) {
+  const taskByCanvasId = new Map(
+    tasks
+      .filter((task) => task.canvasId)
+      .map((task) => [task.canvasId as string, task])
+  )
+
+  return canvases.map((canvas) => {
+    const task = taskByCanvasId.get(canvas.id)
+    if (!task) {
+      return canvas
+    }
+    const status =
+      task.status === 'queued' || task.status === 'running'
+        ? task.status
+        : task.status
+          ? undefined
+          : 'running'
+    return {
+      ...canvas,
+      generationTaskId: status ? task.taskId : undefined,
+      generationTaskStatus: status,
+      generationTaskUpdatedAt: status ? task.updatedAt || task.createdAt : undefined,
+    }
+  })
+}
+
+function savePendingGenerationTasks(tasks: PendingGenerationTaskRecord[]) {
+  window.localStorage.setItem(PENDING_GENERATION_TASKS_STORAGE_KEY, JSON.stringify(tasks))
+}
+
+function upsertPendingGenerationTask(record: PendingGenerationTaskRecord) {
+  const current = loadPendingGenerationTasks()
+  const next = current.filter((item) => item.taskId !== record.taskId)
+  next.push(record)
+  savePendingGenerationTasks(next)
+}
+
+function removePendingGenerationTask(taskId: string) {
+  const next = loadPendingGenerationTasks().filter((item) => item.taskId !== taskId)
+  savePendingGenerationTasks(next)
+}
+
+function removePendingGenerationTasksByCanvasId(canvasId: string) {
+  const next = loadPendingGenerationTasks().filter((item) => item.canvasId !== canvasId)
+  savePendingGenerationTasks(next)
+}
+
+function imageModelScore(model: ModelOption) {
+  const id = model.id.toLowerCase()
+  if (id === DEFAULT_MODEL) return 0
+  if (id.includes('gpt-image')) return 1
+  if (id.includes('dall-e')) return 2
+  if (id.includes('imagen')) return 3
+  if (id.includes('flux')) return 4
+  if (id.includes('image')) return 5
+  return 20
+}
+
+function extractReferenceMentions(prompt: string, knownTitles: string[] = []) {
+  const knownTitleEntries = knownTitles
+    .flatMap((title) => [
+      { raw: title.trim(), normalized: normalizeReferenceTitle(title) },
+      { raw: normalizeReferenceTitle(title), normalized: normalizeReferenceTitle(title) },
+    ])
+    .filter((entry) => entry.raw && entry.normalized)
+  const orderedTitles = [...new Map(knownTitleEntries.map((entry) => [entry.raw, entry])).values()].sort(
+    (a, b) => b.raw.length - a.raw.length
+  )
+
+  if (orderedTitles.length > 0) {
+    const mentions: string[] = []
+    const pattern = new RegExp(`@(${orderedTitles.map((entry) => escapeRegExp(entry.raw)).join('|')})`, 'g')
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(prompt)) !== null) {
+      const matchedRaw = match[1] || ''
+      const entry = orderedTitles.find((item) => item.raw === matchedRaw)
+      const title = entry?.normalized || normalizeReferenceTitle(matchedRaw)
+      if (title && !mentions.includes(title)) mentions.push(title)
+    }
+    if (mentions.length > 0) return mentions
+  }
+
+  const mentions: string[] = []
+  const pattern = /@([^\s@，。,.!！?？;；:：、()[\]{}<>《》"'“”‘’]+(?:\s+\d+)?)/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(prompt)) !== null) {
+    const title = normalizeReferenceTitle(match[1] || '')
+    if (title && !mentions.includes(title)) mentions.push(title)
+  }
+  return mentions
+}
+
+function referenceMentionRawTitles(image: PromptReferenceImage) {
+  return [image.title || image.name, ...(image.aliases || [])]
+    .map((title) => title.trim())
+    .filter(Boolean)
+}
+
+function referenceMentionTitles(image: PromptReferenceImage) {
+  return referenceMentionRawTitles(image)
+    .map((title) => normalizeReferenceTitle(title))
+    .filter(Boolean)
+}
+
+function resolvePromptReferenceImages(prompt: string, images: PromptReferenceImage[]) {
+  const mentions = extractReferenceMentions(
+    prompt,
+    images.flatMap(referenceMentionRawTitles)
+  )
+  if (mentions.length === 0) return { mentions, images: [], missing: [] }
+
+  const matchedImages: ReferenceImage[] = []
+  const missing: string[] = []
+  mentions.forEach((mention) => {
+    const image = images.find((item) => referenceMentionTitles(item).includes(mention))
+    if (image) matchedImages.push(image)
+    else missing.push(mention)
+  })
+
+  return { mentions, images: matchedImages, missing }
+}
+
+function normalizeOptimizedPromptMentions(prompt: string, images: PromptReferenceImage[]) {
+  const orderedTitles = [...new Set(images.flatMap(referenceMentionTitles))].sort(
+    (a, b) => b.length - a.length
+  )
+  if (orderedTitles.length === 0) return prompt.trim()
+
+  let next = prompt
+  orderedTitles.forEach((title) => {
+    const mention = `@${title}`
+    const pattern = new RegExp(escapeRegExp(mention), 'g')
+    next = next.replace(pattern, ` ${mention} `)
+  })
+
+  return next
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\s+([，。,.!！?？;；:：、()[\]{}<>《》"'“”‘’])/g, '$1')
+    .replace(/([，。,.!！?？;；:：、()[\]{}<>《》"'“”‘’])\s+/g, '$1 ')
+    .trim()
+}
+
+function blobFromDataUrl(src: string) {
+  const match = src.match(/^data:([^;,]+)?(;base64)?,(.*)$/)
+  if (!match) return null
+
+  const mimeType = match[1] || 'application/octet-stream'
+  const isBase64 = Boolean(match[2])
+  const payload = match[3] || ''
+  const binary = isBase64 ? atob(payload) : decodeURIComponent(payload)
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
+  return new Blob([bytes], { type: mimeType })
+}
+
+function downloadDataUrl(src: string, filename: string) {
+  const link = document.createElement('a')
+  const blob = blobFromDataUrl(src)
+  const url = blob ? URL.createObjectURL(blob) : src
+
+  link.href = url
+  link.download = filename
+  link.rel = 'noopener'
+  link.style.display = 'none'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+
+  if (blob) {
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+}
+
+function downloadJsonFile(data: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: 'application/json',
+  })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+function newImageId(index: number) {
+  return createLocalId(`image-${index}`)
+}
+
+function fileToDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+}
+
+function loadLocalImage(url: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('图片读取失败'))
+    image.src = url
+  })
+}
+
+async function fileToCommerceReferenceDataUrl(file: File) {
+  if (!file.type.startsWith('image/')) return fileToDataUrl(file)
+
+  const url = URL.createObjectURL(file)
+  try {
+    const image = await loadLocalImage(url)
+    const maxSide = Math.max(image.naturalWidth, image.naturalHeight)
+    const scale = maxSide > COMMERCE_REFERENCE_MAX_SIDE ? COMMERCE_REFERENCE_MAX_SIDE / maxSide : 1
+    const width = Math.max(1, Math.round(image.naturalWidth * scale))
+    const height = Math.max(1, Math.round(image.naturalHeight * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d')
+    if (!context) return fileToDataUrl(file)
+
+    context.fillStyle = '#ffffff'
+    context.fillRect(0, 0, width, height)
+    context.drawImage(image, 0, 0, width, height)
+    return canvas.toDataURL('image/jpeg', COMMERCE_REFERENCE_JPEG_QUALITY)
+  } catch {
+    return fileToDataUrl(file)
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
+function drawImageContained(
+  context: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+) {
+  const imageRatio = image.naturalWidth / image.naturalHeight
+  const frameRatio = width / height
+  const drawWidth = imageRatio > frameRatio ? width : height * imageRatio
+  const drawHeight = imageRatio > frameRatio ? width / imageRatio : height
+  const drawX = x + (width - drawWidth) / 2
+  const drawY = y + (height - drawHeight) / 2
+  context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
+}
+
+async function buildCommerceProductReferenceImage(images: ReferenceImage[]) {
+  if (images.length <= 1) return images[0]
+
+  const loadedImages = await Promise.all(images.map((image) => loadLocalImage(image.dataUrl)))
+  const canvas = document.createElement('canvas')
+  canvas.width = COMMERCE_PRODUCT_SHEET_SIZE
+  canvas.height = COMMERCE_PRODUCT_SHEET_SIZE
+
+  const context = canvas.getContext('2d')
+  if (!context) return images[0]
+
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+
+  const columns = images.length <= 2 ? images.length : 2
+  const rows = Math.ceil(images.length / columns)
+  const padding = 44
+  const gap = 28
+  const labelHeight = 48
+  const cellWidth = (canvas.width - padding * 2 - gap * (columns - 1)) / columns
+  const cellHeight = (canvas.height - padding * 2 - gap * (rows - 1)) / rows
+
+  context.font = '26px Arial, sans-serif'
+  context.textAlign = 'left'
+  context.textBaseline = 'middle'
+
+  loadedImages.forEach((image, index) => {
+    const column = index % columns
+    const row = Math.floor(index / columns)
+    const x = padding + column * (cellWidth + gap)
+    const y = padding + row * (cellHeight + gap)
+
+    context.fillStyle = '#f7f8fb'
+    context.fillRect(x, y, cellWidth, cellHeight)
+    context.strokeStyle = '#d7dbe5'
+    context.lineWidth = 2
+    context.strokeRect(x, y, cellWidth, cellHeight)
+
+    context.fillStyle = '#3d4557'
+    context.fillText(`product angle ${index + 1}`, x + 18, y + labelHeight / 2)
+    drawImageContained(context, image, x + 18, y + labelHeight, cellWidth - 36, cellHeight - labelHeight - 18)
+  })
+
+  return {
+    id: createLocalId('commerce-product-sheet'),
+    name: 'commerce-product-reference-sheet.jpg',
+    title: `商品多角度参考图（${images.length} 张）`,
+    type: 'image/jpeg',
+    dataUrl: canvas.toDataURL('image/jpeg', COMMERCE_REFERENCE_JPEG_QUALITY),
+  }
+}
+
+function taskStatusLabel(status: ImageGenerationTask['status']) {
+  if (status === 'queued') return '任务已提交服务器后台'
+  if (status === 'running') return '服务器正在生成，结果会暂存在缓存区'
+  if (status === 'completed') return '服务器已返回结果，正在保存到本地'
+  if (status === 'expired') return '服务器临时缓存已过期'
+  return '服务器后台生成失败'
+}
+
+function AppDashboardSidebar({
+  currentView,
+  isConfigured,
+  model,
+  themeMode,
+  onNavigate,
+  onThemeChange,
+}: {
+  currentView: AppView
+  isConfigured: boolean
+  model: string
+  themeMode: ThemeMode
+  onNavigate: (view: AppView) => void
+  onThemeChange: (mode: ThemeMode) => void
+}) {
+  const navItems: Array<{ view: AppView; label: string; icon: typeof Home }> = [
+    { view: 'home', label: '快速生成', icon: Home },
+    { view: 'commerce', label: '电商主题', icon: ShoppingBag },
+    { view: 'workflow', label: '工作流', icon: Workflow },
+    { view: 'gallery', label: '图库', icon: Layers },
+    { view: 'console', label: '控制台', icon: Terminal },
+  ]
+
+  return (
+    <Sidebar collapsible='offcanvas' variant='inset'>
+      <SidebarHeader>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton className='data-[slot=sidebar-menu-button]:p-1.5!'>
+              <Sparkles className='size-5!' />
+              <span className='text-base font-semibold'>GPT Image Tools</span>
+            </SidebarMenuButton>
+            <div className='px-2 pb-2 text-xs text-muted-foreground'>
+              {isConfigured ? `已配置 ${model}` : '先完成控制台配置'}
+            </div>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarHeader>
+      <SidebarContent>
+        <SidebarMenu>
+          {navItems.map((item) => {
+            const Icon = item.icon
+            const isActive =
+              currentView === item.view || (currentView === 'workflow' && item.view === 'workflow')
+            return (
+              <SidebarMenuItem key={item.view}>
+                <SidebarMenuButton
+                  isActive={isActive}
+                  tooltip={item.label}
+                  onClick={() => onNavigate(item.view)}
+                >
+                  <Icon />
+                  <span>{item.label}</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            )
+          })}
+        </SidebarMenu>
+      </SidebarContent>
+      <SidebarFooter>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <div className='flex items-center gap-1 px-2'>
+              {themeOptions.map((option) => {
+                const Icon = option.icon
+                return (
+                  <Button
+                    key={option.value}
+                    type='button'
+                    variant={themeMode === option.value ? 'secondary' : 'ghost'}
+                    size='icon'
+                    title={option.label}
+                    aria-pressed={themeMode === option.value}
+                    onClick={() => onThemeChange(option.value)}
+                  >
+                    <Icon />
+                  </Button>
+                )
+              })}
+              <Button type='button' variant='ghost' size='icon' asChild title='GitHub'>
+                <a href={GITHUB_REPO_URL} target='_blank' rel='noreferrer'>
+                  <ExternalLink />
+                </a>
+              </Button>
+            </div>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarFooter>
+    </Sidebar>
+  )
+}
+
+function promptWithStyles(prompt: string, selectedStyles: StyleOption[]) {
+  if (selectedStyles.length === 0) return prompt
+  const styleProtocols = selectedStyles
+    .map(
+      (style, index) =>
+        `风格 ${index + 1}：${style.category} / ${style.name}\n${JSON.stringify(style.styleJson, null, 2)}`
+    )
+    .join('\n\n')
+  return `${prompt}\n\n请按以下风格协议生成图像。风格协议只用于控制视觉效果，不要在画面中渲染 JSON 或参数文字；如果有参考图，请保持参考图主体内容不变，只应用风格转换。\n${styleProtocols}`
+}
+
+async function readGenerationTask(taskId: string) {
+  const response = await fetch(`/api/openai/tasks/${encodeURIComponent(taskId)}`)
+  const text = await response.text()
+  let body: { success?: boolean; message?: string; data?: ImageGenerationTask } | null = null
+
+  if (text) {
+    try {
+      body = JSON.parse(text)
+    } catch {
+      throw new Error('查询服务器任务状态失败：返回了无效数据')
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(body?.message || `查询服务器任务状态失败：HTTP ${response.status}`)
+  }
+  if (!body?.success || !body.data) {
+    throw new Error(body?.message || '查询服务器任务状态失败')
+  }
+
+  return body.data
+}
+
+export function App() {
+  const [currentView, setCurrentView] = useState<AppView>('home')
+  const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL)
+  const [apiKey, setApiKey] = useState('')
+  const [codexApiKey, setCodexApiKey] = useState('')
+  const [persistApiKey, setPersistApiKey] = useState(false)
+  const [hasLoadedSettings, setHasLoadedSettings] = useState(false)
+  const [isLoginDialogOpen, setIsLoginDialogOpen] = useState(false)
+  const [loginBaseUrl, setLoginBaseUrl] = useState(DEFAULT_BASE_URL)
+  const [loginUsername, setLoginUsername] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
+  const [loginImageGroup, setLoginImageGroup] = useState(DEFAULT_MODEL)
+  const [loginImageModel, setLoginImageModel] = useState(DEFAULT_MODEL)
+  const [loginImageTokenName, setLoginImageTokenName] = useState('GPT Image Tools - image')
+  const [loginCodexGroup, setLoginCodexGroup] = useState(DEFAULT_TEXT_MODEL)
+  const [loginCodexModel, setLoginCodexModel] = useState(DEFAULT_TEXT_MODEL)
+  const [loginCodexTokenName, setLoginCodexTokenName] = useState('GPT Image Tools - text')
+  const [isNewApiLoggingIn, setIsNewApiLoggingIn] = useState(false)
+  const [themeMode, setThemeMode] = useState<ThemeMode>('dark')
+  const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('dark')
+  const [models, setModels] = useState<ModelOption[]>([])
+  const [styles, setStyles] = useState<StyleOption[]>([])
+  const [styleCategories, setStyleCategories] = useState<Array<{ name: string; count: number }>>([])
+  const [isLoadingStyles, setIsLoadingStyles] = useState(false)
+  const [model, setModel] = useState(DEFAULT_MODEL)
+  const [textModel, setTextModel] = useState(DEFAULT_TEXT_MODEL)
+  const [size, setSize] = useState('1024x1024')
+  const [sizeMode, setSizeMode] = useState<'preset' | 'custom'>('preset')
+  const [customSizeWidth, setCustomSizeWidth] = useState('1024')
+  const [customSizeHeight, setCustomSizeHeight] = useState('1024')
+  const [quality, setQuality] = useState('auto')
+  const [count, setCount] = useState(1)
+  const [responseFormat, setResponseFormat] = useState<'url' | 'b64_json'>('b64_json')
+  const [inputFidelity, setInputFidelity] = useState<'low' | 'high'>('high')
+  const [simplePrompt, setSimplePrompt] = useState('')
+  const [commerceProductImages, setCommerceProductImages] = useState<ReferenceImage[]>([])
+  const [commerceStyleImage, setCommerceStyleImage] = useState<ReferenceImage | null>(null)
+  const [commerceDescription, setCommerceDescription] = useState('')
+  const [commerceGenerateKind, setCommerceGenerateKind] = useState<'main' | 'detail'>('main')
+  const [commerceCategoryMode, setCommerceCategoryMode] = useState<'preset' | 'custom'>('preset')
+  const [commerceCategoryLevel1, setCommerceCategoryLevel1] = useState('')
+  const [commerceCategoryLevel2, setCommerceCategoryLevel2] = useState('')
+  const [commerceCategoryLevel3, setCommerceCategoryLevel3] = useState('')
+  const [commerceCustomCategory, setCommerceCustomCategory] = useState('')
+  const [canvases, setCanvases] = useState<WorkflowCanvas[]>(loadWorkflowCanvases)
+  const [activeCanvasId, setActiveCanvasId] = useState(loadActiveCanvasId)
+  const [isLoadingModels, setIsLoadingModels] = useState(false)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [isOptimizingSimplePrompt, setIsOptimizingSimplePrompt] = useState(false)
+  const [optimizingPromptNodeIds, setOptimizingPromptNodeIds] = useState<Set<string>>(
+    () => new Set()
+  )
+  const [images, setImages] = useState<LocalImageRecord[]>([])
+  const [previewImage, setPreviewImage] = useState<LocalImageRecord | null>(null)
+  const [status, setStatus] = useState('未连接')
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState<{ id: number; message: string } | null>(null)
+  const [completionNotice, setCompletionNotice] = useState<{
+    id: number
+    message: string
+    imageCount: number
+  } | null>(null)
+  const [paneMenu, setPaneMenu] = useState<PaneMenu>(null)
+  const [isSidebarDrawerOpen, setIsSidebarDrawerOpen] = useState(false)
+  const [isCanvasDrawerOpen, setIsCanvasDrawerOpen] = useState(false)
+  const [flowInstance, setFlowInstance] =
+    useState<ReactFlowInstance<WorkflowNode, WorkflowEdge> | null>(null)
+  const generationTaskIdsRef = useRef(new Set<string>())
+  const lastSavedReferenceImageBlobSignatureRef = useRef('')
+  const hasManuallyToggledCanvasDrawerRef = useRef(false)
+  const workflowUndoStackRef = useRef<WorkflowHistoryEntry[]>([])
+  const isRestoringWorkflowRef = useRef(false)
+  const workflowHistoryDebounceTimersRef = useRef(new Map<string, number>())
+  const lastWorkflowHistoryPositionSnapshotRef = useRef(new Map<string, WorkflowNode[]>())
+  const workflowStorageSaveTimerRef = useRef(0)
+  const workflowBlobSaveTimerRef = useRef(0)
+  const workflowNodeDataCacheRef = useRef<WorkflowNodeDataMap>({})
+  const commerceCategoryLevel1Node = commerceCategoryTree.find((item) => item.name === commerceCategoryLevel1)
+  const commerceCategoryLevel2Options = commerceCategoryLevel1Node?.children || []
+  const commerceCategoryLevel2Node = commerceCategoryLevel2Options.find((item) => item.name === commerceCategoryLevel2)
+  const commerceCategoryLevel3Options = commerceCategoryLevel2Node?.children || []
+  const selectedCommerceCategoryPath = [
+    commerceCategoryLevel1,
+    commerceCategoryLevel2,
+    commerceCategoryLevel3,
+  ].filter(Boolean).join(' / ')
+  const effectiveCommerceCategoryPath =
+    commerceCategoryMode === 'custom' ? commerceCustomCategory.trim() : selectedCommerceCategoryPath
+
+  const activeCanvas = useMemo(
+    () => canvases.find((canvas) => canvas.id === activeCanvasId) || canvases[0],
+    [activeCanvasId, canvases]
+  )
+  const nodes = activeCanvas?.nodes || []
+  const edges = activeCanvas?.edges || []
+  const generationMode = activeCanvas?.generationMode || 'text'
+  const referenceImages = useMemo(() => getCanvasReferenceImages(activeCanvas), [activeCanvas])
+  const activeCanvasGenerating = activeCanvas ? isCanvasGenerating(activeCanvas) : false
+  const referenceImageBlobs = useMemo(
+    () => extractReferenceImageBlobs(canvases),
+    [canvases]
+  )
+  const referenceImageBlobSignature = useMemo(
+    () => referenceImageBlobs.map((blob) => `${blob.id}:${blob.dataUrl}`).join('|'),
+    [referenceImageBlobs]
+  )
+  const isConfigured = Boolean(baseUrl.trim() && apiKey.trim() && model.trim())
+
+  const pushWorkflowHistorySnapshot = useCallback((canvas: WorkflowCanvas) => {
+    if (isRestoringWorkflowRef.current) return
+    const snapshot = cloneWorkflowCanvasSnapshot(canvas)
+    const stack = workflowUndoStackRef.current
+    const lastEntry = stack[stack.length - 1]
+    const isSameSnapshot =
+      lastEntry?.canvasId === canvas.id &&
+      JSON.stringify(lastEntry.snapshot) === JSON.stringify(snapshot)
+    if (isSameSnapshot) return
+    stack.push({ canvasId: canvas.id, snapshot })
+    if (stack.length > WORKFLOW_HISTORY_LIMIT) {
+      stack.splice(0, stack.length - WORKFLOW_HISTORY_LIMIT)
+    }
+  }, [])
+
+  const clearWorkflowHistoryDebounce = useCallback((canvasId: string) => {
+    const timer = workflowHistoryDebounceTimersRef.current.get(canvasId)
+    if (timer) {
+      window.clearTimeout(timer)
+      workflowHistoryDebounceTimersRef.current.delete(canvasId)
+    }
+  }, [])
+
+  const scheduleWorkflowHistorySnapshot = useCallback(
+    (canvas: WorkflowCanvas, mode: 'immediate' | 'debounced' = 'debounced') => {
+      if (isRestoringWorkflowRef.current) return
+      clearWorkflowHistoryDebounce(canvas.id)
+
+      if (mode === 'immediate') {
+        pushWorkflowHistorySnapshot(canvas)
+        return
+      }
+
+      const timer = window.setTimeout(() => {
+        workflowHistoryDebounceTimersRef.current.delete(canvas.id)
+        pushWorkflowHistorySnapshot(canvas)
+      }, WORKFLOW_HISTORY_PUSH_DELAY_MS)
+
+      workflowHistoryDebounceTimersRef.current.set(canvas.id, timer)
+    },
+    [clearWorkflowHistoryDebounce, pushWorkflowHistorySnapshot]
+  )
+
+  const updateActiveCanvas = useCallback(
+    (
+      updater: (canvas: WorkflowCanvas) => WorkflowCanvas,
+      options?: { history?: 'immediate' | 'debounced' | 'skip' }
+    ) => {
+      setCanvases((currentCanvases) =>
+        currentCanvases.map((canvas) =>
+          canvas.id === activeCanvas?.id
+            ? (() => {
+                const historyMode = options?.history || 'debounced'
+                if (historyMode !== 'skip') {
+                  scheduleWorkflowHistorySnapshot(canvas, historyMode)
+                }
+                return { ...updater(canvas), updatedAt: Date.now() }
+              })()
+            : canvas
+        )
+      )
+    },
+    [activeCanvas?.id, scheduleWorkflowHistorySnapshot]
+  )
+
+  const setNodes = useCallback(
+    (updater: StateUpdater<WorkflowNode[]>) => {
+      updateActiveCanvas((canvas) => ({
+        ...canvas,
+        nodes: resolveUpdater(updater, canvas.nodes),
+      }))
+    },
+    [updateActiveCanvas]
+  )
+
+  const setEdges = useCallback(
+    (updater: StateUpdater<WorkflowEdge[]>) => {
+      updateActiveCanvas((canvas) => ({
+        ...canvas,
+        edges: resolveUpdater(updater, canvas.edges),
+      }))
+    },
+    [updateActiveCanvas]
+  )
+
+  const setPromptNodePrompt = useCallback(
+    (nodeId: string, updater: StateUpdater<string>) => {
+      setNodes((currentNodes) =>
+        currentNodes.map((node) => {
+          if (node.id !== nodeId || node.type !== 'prompt') return node
+
+          const nextPrompt = resolveUpdater(updater, getWorkflowNodePrompt(node))
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              prompt: nextPrompt,
+            },
+          }
+        })
+      )
+    },
+    [setNodes]
+  )
+
+  const setPromptNodeOptimizationPreset = useCallback(
+    (nodeId: string, nextPreset: PromptOptimizationPreset) => {
+      setNodes((currentNodes) =>
+        currentNodes.map((node) =>
+          node.id === nodeId && node.type === 'prompt'
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  promptOptimizationPreset: nextPreset,
+                },
+              }
+            : node
+        )
+      )
+    },
+    [setNodes]
+  )
+
+  const setGenerationMode = useCallback(
+    (nextMode: 'text' | 'image') => {
+      updateActiveCanvas((canvas) => ({ ...canvas, generationMode: nextMode }))
+    },
+    [updateActiveCanvas]
+  )
+
+  const setAssetNodeReferenceImages = useCallback(
+    (nodeId: string, updater: StateUpdater<ReferenceImage[]>) => {
+      updateActiveCanvas((canvas) => ({
+        ...canvas,
+        referenceImages: [],
+        nodes: canvas.nodes.map((node) => {
+          if (node.id !== nodeId || node.type !== 'asset') return node
+
+          const currentImages = getWorkflowNodeReferenceImages(node)
+          const nextImages = normalizeAssetNodeReferenceImages(resolveUpdater(updater, currentImages))
+
+          return {
+            ...node,
+            data: nextImages.length > 0 ? { referenceImages: nextImages } : {},
+          }
+        }),
+      }))
+    },
+    [updateActiveCanvas]
+  )
+
+  const setStyleNodeSelection = useCallback(
+    (nodeId: string, selectedStyleId: string) => {
+      updateActiveCanvas((canvas) => ({
+        ...canvas,
+        nodes: canvas.nodes.map((node) =>
+          node.id === nodeId && node.type === 'style'
+            ? {
+                ...node,
+                data: selectedStyleId ? { selectedStyleId } : {},
+              }
+            : node
+        ),
+      }))
+      const style = styles.find((item) => item.id === selectedStyleId)
+      setStatus(style ? `已选择风格：${style.name}` : '风格已清空')
+    },
+    [styles, updateActiveCanvas]
+  )
+
+  const onNodesChange = useCallback(
+    (changes: NodeChange<WorkflowNode>[]) => {
+      const positionOnlyChanges = changes.length > 0 && changes.every((change) => change.type === 'position')
+      updateActiveCanvas(
+        (canvas) => ({
+          ...canvas,
+          nodes: applyNodeChanges(changes, canvas.nodes),
+        }),
+        { history: positionOnlyChanges ? 'skip' : 'debounced' }
+      )
+    },
+    [updateActiveCanvas]
+  )
+
+  const onEdgesChange = useCallback(
+    (changes: EdgeChange<WorkflowEdge>[]) => {
+      setEdges((currentEdges) => applyEdgeChanges(changes, currentEdges))
+    },
+    [setEdges]
+  )
+
+  const sortedModels = useMemo(
+    () =>
+      [...models].sort((a, b) => {
+        const diff = imageModelScore(a) - imageModelScore(b)
+        return diff || a.id.localeCompare(b.id)
+      }),
+    [models]
+  )
+
+  useEffect(() => {
+    void getSettings()
+      .then((settings) => {
+        setBaseUrl(settings.baseUrl || DEFAULT_BASE_URL)
+        setPersistApiKey(Boolean(settings.persistApiKey))
+        setThemeMode(settings.themeMode || 'system')
+        setTextModel(settings.textModel || DEFAULT_TEXT_MODEL)
+        if (settings.persistApiKey && settings.apiKey) setApiKey(settings.apiKey)
+        if (settings.persistApiKey && settings.codexApiKey) setCodexApiKey(settings.codexApiKey)
+      })
+      .finally(() => setHasLoadedSettings(true))
+    void refreshImages()
+  }, [])
+
+  useEffect(() => {
+    if (!hasLoadedSettings || isConfigured || currentView === 'console') return
+    setError('')
+    setCurrentView('console')
+  }, [currentView, hasLoadedSettings, isConfigured])
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(null), 7000)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+
+  useEffect(() => {
+    if (!completionNotice) return
+    const timer = window.setTimeout(() => setCompletionNotice(null), 9000)
+    return () => window.clearTimeout(timer)
+  }, [completionNotice])
+
+  useEffect(() => {
+    if (isConfigured) setNotice(null)
+  }, [isConfigured])
+
+  useEffect(() => {
+    if (!isSidebarDrawerOpen) return
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') setIsSidebarDrawerOpen(false)
+    }
+
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [isSidebarDrawerOpen])
+
+  useEffect(() => {
+    let cancelled = false
+    setIsLoadingStyles(true)
+    void bridge.listStyles()
+      .then((library) => {
+        if (cancelled) return
+        setStyles(library.styles)
+        setStyleCategories(library.categories)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        const message = err instanceof Error ? err.message : String(err)
+        setStatus(message)
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingStyles(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    void resumePersistedGenerationTasks()
+  }, [])
+
+  useEffect(() => {
+    if (!activeCanvas && canvases[0]) {
+      setActiveCanvasId(canvases[0].id)
+      return
+    }
+
+    if (activeCanvas && activeCanvas.id !== activeCanvasId) {
+      setActiveCanvasId(activeCanvas.id)
+    }
+  }, [activeCanvas, activeCanvasId, canvases])
+
+  useEffect(() => {
+    window.clearTimeout(workflowStorageSaveTimerRef.current)
+    workflowStorageSaveTimerRef.current = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(
+          WORKFLOW_CANVASES_STORAGE_KEY,
+          JSON.stringify(serializeWorkflowCanvases(canvases))
+        )
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        if (/quota/i.test(message)) {
+          setStatus('画布已切换到磁盘缓存保存')
+        } else {
+          setError(message)
+        }
+      }
+    }, WORKFLOW_STORAGE_SAVE_DELAY_MS)
+
+    return () => window.clearTimeout(workflowStorageSaveTimerRef.current)
+  }, [canvases])
+
+  useEffect(() => {
+    let cancelled = false
+
+    void listReferenceImageBlobs()
+      .then((blobs) => {
+        if (cancelled || blobs.length === 0) return
+        setCanvases((current) => hydrateWorkflowCanvases(current, blobs))
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (referenceImageBlobSignature === lastSavedReferenceImageBlobSignatureRef.current) return
+    window.clearTimeout(workflowBlobSaveTimerRef.current)
+    workflowBlobSaveTimerRef.current = window.setTimeout(() => {
+      lastSavedReferenceImageBlobSignatureRef.current = referenceImageBlobSignature
+      void saveReferenceImageBlobs(referenceImageBlobs)
+    }, WORKFLOW_BLOB_SAVE_DELAY_MS)
+
+    return () => window.clearTimeout(workflowBlobSaveTimerRef.current)
+  }, [referenceImageBlobSignature, referenceImageBlobs])
+
+  useEffect(() => {
+    if (activeCanvas?.id) {
+      window.localStorage.setItem(ACTIVE_CANVAS_STORAGE_KEY, activeCanvas.id)
+    }
+  }, [activeCanvas?.id])
+
+  useEffect(() => {
+    return () => {
+      workflowHistoryDebounceTimersRef.current.forEach((timer) => window.clearTimeout(timer))
+      workflowHistoryDebounceTimersRef.current.clear()
+      window.clearTimeout(workflowStorageSaveTimerRef.current)
+      window.clearTimeout(workflowBlobSaveTimerRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    const query = window.matchMedia('(prefers-color-scheme: dark)')
+    const applyTheme = () => {
+      const nextTheme =
+        themeMode === 'system' ? (query.matches ? 'dark' : 'light') : themeMode
+      setResolvedTheme(nextTheme)
+      document.documentElement.dataset.theme = nextTheme
+      document.documentElement.dataset.themeMode = themeMode
+    }
+
+    applyTheme()
+    query.addEventListener('change', applyTheme)
+    return () => query.removeEventListener('change', applyTheme)
+  }, [themeMode])
+
+  useEffect(() => {
+    if (!previewImage) return
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') setPreviewImage(null)
+    }
+
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [previewImage])
+
+  useEffect(() => {
+    if (!flowInstance) return
+
+    let resizeTimer = 0
+    const refit = () => {
+      window.clearTimeout(resizeTimer)
+      resizeTimer = window.setTimeout(() => {
+        flowInstance.fitView({
+          padding: window.innerWidth > 1500 ? 0.18 : 0.1,
+          duration: 260,
+        })
+      }, 120)
+    }
+
+    refit()
+    window.addEventListener('resize', refit)
+    return () => {
+      window.clearTimeout(resizeTimer)
+      window.removeEventListener('resize', refit)
+    }
+  }, [activeCanvas?.id, flowInstance, resolvedTheme])
+
+  useEffect(() => {
+    const activeId = activeCanvas?.id
+    if (!activeId) return
+
+    const lastSnapshot = lastWorkflowHistoryPositionSnapshotRef.current.get(activeId)
+    if (!lastSnapshot) {
+      lastWorkflowHistoryPositionSnapshotRef.current.set(activeId, nodes.map((node) => ({
+        ...node,
+        position: { ...node.position },
+      })))
+      return
+    }
+
+    if (areNodePositionsSame(lastSnapshot, nodes)) return
+
+    scheduleWorkflowHistorySnapshot(activeCanvas, 'debounced')
+    lastWorkflowHistoryPositionSnapshotRef.current.set(
+      activeId,
+      nodes.map((node) => ({
+        ...node,
+        position: { ...node.position },
+      }))
+    )
+  }, [activeCanvas, nodes, scheduleWorkflowHistorySnapshot])
+
+  const handleUndoWorkflow = useCallback(() => {
+    if (currentView !== 'workflow') return
+    const activeId = activeCanvas?.id
+    if (!activeId) return
+
+    const stack = workflowUndoStackRef.current
+    for (let index = stack.length - 1; index >= 0; index -= 1) {
+      const entry = stack[index]
+      if (entry?.canvasId !== activeId) continue
+      stack.splice(index, 1)
+      isRestoringWorkflowRef.current = true
+      setCanvases((currentCanvases) =>
+        currentCanvases.map((canvas) =>
+          canvas.id === activeId
+            ? { ...cloneWorkflowCanvasSnapshot(entry.snapshot), updatedAt: Date.now() }
+            : canvas
+        )
+      )
+      window.setTimeout(() => {
+        isRestoringWorkflowRef.current = false
+      }, 0)
+      setStatus('已撤销上一步工作流修改')
+      setPaneMenu(null)
+      return
+    }
+
+    setStatus('没有可撤销的工作流修改')
+  }, [activeCanvas?.id, currentView])
+
+  const handleSaveWorkflow = useCallback(async () => {
+    if (currentView !== 'workflow') return
+
+    try {
+      window.localStorage.setItem(
+        WORKFLOW_CANVASES_STORAGE_KEY,
+        JSON.stringify(serializeWorkflowCanvases(canvases))
+      )
+      if (activeCanvas?.id) {
+        window.localStorage.setItem(ACTIVE_CANVAS_STORAGE_KEY, activeCanvas.id)
+      }
+      await saveReferenceImageBlobs(referenceImageBlobs)
+      lastSavedReferenceImageBlobSignatureRef.current = referenceImageBlobSignature
+      setStatus('工作流已保存')
+      toast.success('工作流保存成功')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setStatus('工作流保存失败')
+    }
+  }, [
+    activeCanvas?.id,
+    canvases,
+    currentView,
+    referenceImageBlobSignature,
+    referenceImageBlobs,
+  ])
+
+  useEffect(() => {
+    function handleWorkflowUndoHotkey(event: KeyboardEvent) {
+      if (currentView !== 'workflow') return
+      if (event.defaultPrevented) return
+      if (isEditableKeyboardTarget(event.target)) return
+      if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) return
+      if (event.key.toLowerCase() !== 'z') return
+      event.preventDefault()
+      handleUndoWorkflow()
+    }
+
+    window.addEventListener('keydown', handleWorkflowUndoHotkey)
+    return () => window.removeEventListener('keydown', handleWorkflowUndoHotkey)
+  }, [currentView, handleUndoWorkflow])
+
+  useEffect(() => {
+    function handleWorkflowSaveHotkey(event: KeyboardEvent) {
+      if (currentView !== 'workflow') return
+      if (event.defaultPrevented) return
+      if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) return
+      if (event.key.toLowerCase() !== 's') return
+      event.preventDefault()
+      void handleSaveWorkflow()
+    }
+
+    window.addEventListener('keydown', handleWorkflowSaveHotkey)
+    return () => window.removeEventListener('keydown', handleWorkflowSaveHotkey)
+  }, [currentView, handleSaveWorkflow])
+
+  async function refreshImages() {
+    setImages(await listImages())
+  }
+
+  function savePendingGenerationTaskRecord(
+    task: ImageGenerationTask,
+    context: {
+      prompt: string
+      model: string
+      size: string
+      quality: string
+      mode: 'text' | 'image'
+      referenceImageNames?: string[]
+      canvasId?: string
+      generateNodeId?: string
+    }
+  ) {
+    upsertPendingGenerationTask({
+      taskId: task.taskId,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      status: task.status,
+      ...context,
+    })
+  }
+
+  function clearPendingGenerationTaskRecord(taskId: string) {
+    removePendingGenerationTask(taskId)
+  }
+
+  function setCanvasGenerationTask(
+    canvasId: string,
+    task: Pick<ImageGenerationTask, 'taskId' | 'status' | 'updatedAt' | 'createdAt'> | null
+  ) {
+    setCanvases((currentCanvases) =>
+      currentCanvases.map((canvas) =>
+        canvas.id === canvasId
+          ? {
+              ...canvas,
+              generationTaskId:
+                task && (task.status === 'queued' || task.status === 'running')
+                  ? task.taskId
+                  : undefined,
+              generationTaskStatus:
+                task && (task.status === 'queued' || task.status === 'running')
+                  ? task.status
+                  : undefined,
+              generationTaskUpdatedAt:
+                task && (task.status === 'queued' || task.status === 'running')
+                  ? task.updatedAt || task.createdAt
+                  : undefined,
+              updatedAt: Date.now(),
+            }
+          : canvas
+      )
+    )
+  }
+
+  function clearCanvasGenerationTask(canvasId: string) {
+    setCanvasGenerationTask(canvasId, null)
+  }
+
+  function buildLocalImageRecords(
+    images: Array<{ src: string; revisedPrompt?: string }>,
+    context: {
+      prompt: string
+      model: string
+      size: string
+      quality: string
+      mode: 'text' | 'image'
+      referenceImageNames?: string[]
+    }
+  ) {
+    const createdAt = Date.now()
+    return images.map((item, index) => ({
+      id: newImageId(index),
+      src: item.src,
+      prompt: context.prompt,
+      model: context.model,
+      size: context.size,
+      quality: context.quality,
+      createdAt,
+      revisedPrompt: item.revisedPrompt,
+      mode: context.mode,
+      referenceImageNames: context.referenceImageNames,
+    }))
+  }
+
+  function announceGenerationComplete(
+    records: LocalImageRecord[],
+    message: string,
+    options?: { openPreview?: boolean }
+  ) {
+    if (records[0] && options?.openPreview !== false) {
+      setPreviewImage(records[0])
+    }
+    setCompletionNotice({
+      id: Date.now(),
+      message,
+      imageCount: records.length,
+    })
+  }
+
+  async function persistCompletedTaskResult(
+    taskId: string,
+    generatedImages: Array<{ src: string; revisedPrompt?: string }>,
+    context: {
+      prompt: string
+      model: string
+      size: string
+      quality: string
+      mode: 'text' | 'image'
+      referenceImageNames?: string[]
+      canvasId?: string
+      generateNodeId?: string
+    }
+  ) {
+    const records = buildLocalImageRecords(generatedImages, context)
+    await saveImages(records)
+    if (context.canvasId && records[0]) {
+      setCanvases((currentCanvases) =>
+        currentCanvases.map((canvas) =>
+          canvas.id === context.canvasId
+            ? {
+                ...canvas,
+                latestImageId: records[0].id,
+                nodes: context.generateNodeId
+                  ? canvas.nodes.map((node) =>
+                      node.id === context.generateNodeId && node.type === 'generate'
+                        ? {
+                            ...node,
+                            data: {
+                              ...node.data,
+                              latestImageId: records[0].id,
+                            },
+                          }
+                        : node
+                    )
+                  : canvas.nodes,
+                generationTaskId: undefined,
+                generationTaskStatus: undefined,
+                generationTaskUpdatedAt: undefined,
+                updatedAt: Date.now(),
+              }
+            : canvas
+        )
+      )
+    }
+    await refreshImages()
+    clearPendingGenerationTaskRecord(taskId)
+    return records
+  }
+
+  async function urlToDataUrlLocal(url: string) {
+    const response = await fetch(url)
+    if (!response.ok) throw new Error(`Failed to download image: ${response.status}`)
+    const blob = await response.blob()
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result))
+      reader.onerror = () => reject(reader.error)
+      reader.readAsDataURL(blob)
+    })
+  }
+
+  async function taskResultToGeneratedImages(taskResult: ImageGenerationTask['result']) {
+    const images: Array<{ src: string; revisedPrompt?: string }> = []
+    for (const item of taskResult?.data || []) {
+      if (item.b64_json) {
+        images.push({
+          src: `data:image/png;base64,${item.b64_json}`,
+          revisedPrompt: item.revised_prompt,
+        })
+      } else if (item.url) {
+        images.push({
+          src: await urlToDataUrlLocal(item.url),
+          revisedPrompt: item.revised_prompt,
+        })
+      }
+    }
+    return images
+  }
+
+  async function resumePersistedGenerationTasks() {
+    const pendingTasks = loadPendingGenerationTasks()
+    for (const task of pendingTasks) {
+      if (generationTaskIdsRef.current.has(task.taskId)) continue
+      generationTaskIdsRef.current.add(task.taskId)
+      if (!task.canvasId) {
+        clearPendingGenerationTaskRecord(task.taskId)
+        generationTaskIdsRef.current.delete(task.taskId)
+        continue
+      }
+
+      try {
+        setIsGenerating(true)
+        setStatus(taskStatusLabel('queued'))
+        setCanvasGenerationTask(task.canvasId, {
+          taskId: task.taskId,
+          status: task.status || 'queued',
+          updatedAt: task.updatedAt || task.createdAt,
+          createdAt: task.createdAt,
+        })
+
+        let currentTask = await readGenerationTask(task.taskId)
+        while (currentTask.status === 'queued' || currentTask.status === 'running') {
+          setStatus(taskStatusLabel(currentTask.status))
+          setCanvasGenerationTask(task.canvasId, currentTask)
+          await new Promise((resolve) => window.setTimeout(resolve, currentTask.pollAfterMs || 1500))
+          currentTask = await readGenerationTask(task.taskId)
+        }
+
+        if (currentTask.status === 'failed' || currentTask.status === 'expired') {
+          clearPendingGenerationTaskRecord(task.taskId)
+          clearCanvasGenerationTask(task.canvasId)
+          setError(currentTask.error || '服务器后台生图失败')
+          setStatus(taskStatusLabel(currentTask.status))
+          continue
+        }
+
+        if (!currentTask.result) {
+          clearPendingGenerationTaskRecord(task.taskId)
+          setError('服务器后台任务没有返回生成结果')
+          setStatus('生成失败')
+          continue
+        }
+
+        const generatedImages = await taskResultToGeneratedImages(currentTask.result)
+        await persistCompletedTaskResult(task.taskId, generatedImages, task)
+        setStatus('服务器缓存结果已恢复到本地图库')
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        setError(message)
+        clearCanvasGenerationTask(task.canvasId)
+        clearPendingGenerationTaskRecord(task.taskId)
+        setStatus('恢复后台任务失败')
+      } finally {
+        generationTaskIdsRef.current.delete(task.taskId)
+        setIsGenerating(false)
+      }
+    }
+  }
+
+  async function handleSaveSettings() {
+    const shouldPersistApiKey = persistApiKey || Boolean(apiKey.trim() || codexApiKey.trim())
+    const savedSettings = await saveSettings({
+      baseUrl,
+      persistApiKey: shouldPersistApiKey,
+      apiKey,
+      codexApiKey,
+      textModel,
+      themeMode,
+    })
+    setPersistApiKey(savedSettings.persistApiKey)
+    setStatus(savedSettings.persistApiKey ? '设置和 API Key 已保存' : '设置已保存，API Key 未落盘')
+  }
+
+  async function handleThemeChange(nextThemeMode: ThemeMode) {
+    setThemeMode(nextThemeMode)
+    await saveSettings({
+      baseUrl,
+      persistApiKey,
+      apiKey,
+      codexApiKey,
+      textModel,
+      themeMode: nextThemeMode,
+    })
+    setStatus('主题已切换')
+  }
+
+  async function handleOpenConsole() {
+    if (!baseUrl.trim()) {
+      setError('请先填写 Base URL')
+      return
+    }
+    await bridge.openExternal(baseUrl.trim().replace(/\/+$/, '') + '/')
+  }
+
+  async function handleExportBackup() {
+    const backup = await exportBackup()
+    const date = new Date(backup.exportedAt).toISOString().slice(0, 10)
+    downloadJsonFile(backup, `gpt-image-tools-backup-${date}.json`)
+    setStatus('本地备份已导出')
+  }
+
+  async function handleImportBackup(file: File) {
+    try {
+      const text = await file.text()
+      const importedCount = await importBackup(JSON.parse(text))
+      const settings = await getSettings()
+      setBaseUrl(settings.baseUrl || DEFAULT_BASE_URL)
+      setPersistApiKey(Boolean(settings.persistApiKey))
+      setThemeMode(settings.themeMode || 'system')
+      setTextModel(settings.textModel || DEFAULT_TEXT_MODEL)
+      setApiKey('')
+      setCodexApiKey('')
+      await refreshImages()
+      setStatus(`已导入 ${importedCount} 张图片，API Key 未从备份恢复`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setStatus('导入备份失败')
+    }
+  }
+
+  async function addReferenceFiles(nodeId: string, files: FileList | File[]) {
+    const imageFiles = [...files].filter((file) => file.type.startsWith('image/'))
+    if (imageFiles.length === 0) return
+
+    const selectedFile = imageFiles[0]
+    if (!selectedFile) return
+    const baseTitle = referenceTitleFromFileName(selectedFile.name, 0)
+
+    const nextImage: ReferenceImage = {
+      id: createLocalId('reference'),
+      name: selectedFile.name,
+      title: createUniqueReferenceTitle(baseTitle, getCanvasReferenceNameEntries(activeCanvas)),
+      type: selectedFile.type || 'image/png',
+      dataUrl: await fileToDataUrl(selectedFile),
+    }
+
+    setAssetNodeReferenceImages(nodeId, [nextImage])
+    setGenerationMode('image')
+    if (imageFiles.length > 1) {
+      setStatus('每个参考图节点只能放 1 张图片，已保留第一张')
+    }
+  }
+
+  function removeReferenceImage(nodeId: string, id: string) {
+    const willRemoveLastReference =
+      referenceImages.length <= 1 && referenceImages.some((image) => image.id === id)
+    setAssetNodeReferenceImages(nodeId, (current) =>
+      current.filter((image) => image.id !== id)
+    )
+    if (willRemoveLastReference) setGenerationMode('text')
+  }
+
+  function updateReferenceImageTitle(nodeId: string, id: string, title: string) {
+    const nextTitle = normalizeReferenceTitle(title)
+    if (
+      activeCanvas &&
+      nextTitle &&
+      isReferenceTitleTaken(activeCanvas, nextTitle, referenceImageOwnerId(id))
+    ) {
+      setError(`画布内已存在图片名称：${nextTitle}`)
+      setStatus('图片名称不能重复')
+      return
+    }
+
+    setError('')
+    setAssetNodeReferenceImages(nodeId, (current) =>
+      current.map((image) =>
+        image.id === id ? { ...image, title: nextTitle } : image
+      )
+    )
+  }
+
+  function updateGenerateNodeOutputTitle(nodeId: string, title: string) {
+    const nextTitle = normalizeReferenceTitle(title) || defaultGenerateOutputTitle(nodeId)
+    if (
+      activeCanvas &&
+      isReferenceTitleTaken(activeCanvas, nextTitle, generateOutputOwnerId(nodeId))
+    ) {
+      setError(`画布内已存在图片名称：${nextTitle}`)
+      setStatus('图片名称不能重复')
+      return
+    }
+
+    setError('')
+    setNodes((currentNodes) =>
+      currentNodes.map((node) =>
+        node.id === nodeId && node.type === 'generate'
+          ? {
+              ...node,
+              data: {
+                ...node.data,
+                outputTitle: nextTitle,
+              },
+            }
+          : node
+      )
+    )
+  }
+
+  async function handleFetchModels() {
+    setError('')
+    setStatus('正在获取模型...')
+    setIsLoadingModels(true)
+
+    try {
+      const nextModels = await bridge.listModels({ baseUrl, apiKey })
+      setModels(nextModels)
+
+      const preferred =
+        nextModels.find((item) => item.id === DEFAULT_MODEL) ||
+        [...nextModels].sort((a, b) => imageModelScore(a) - imageModelScore(b))[0]
+
+      if (preferred) setModel(preferred.id)
+      setStatus(`已获取 ${nextModels.length} 个模型`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setStatus('获取模型失败')
+    } finally {
+      setIsLoadingModels(false)
+    }
+  }
+
+  async function handleNewApiLogin() {
+    if (!loginBaseUrl.trim() || !loginUsername.trim() || !loginPassword) {
+      setError('请填写中转站地址、账号和密码')
+      return
+    }
+    if (
+      !loginImageGroup.trim() ||
+      !loginImageModel.trim() ||
+      !loginImageTokenName.trim() ||
+      !loginCodexGroup.trim() ||
+      !loginCodexModel.trim() ||
+      !loginCodexTokenName.trim()
+    ) {
+      setError('请完整填写生图和文本 Token 配置')
+      return
+    }
+
+    setError('')
+    setStatus('正在登录中转站...')
+    setIsNewApiLoggingIn(true)
+
+    try {
+      const result = await bridge.loginNewApi({
+        baseUrl: loginBaseUrl,
+        username: loginUsername,
+        password: loginPassword,
+        imageGroup: loginImageGroup,
+        imageModel: loginImageModel,
+        imageTokenName: loginImageTokenName,
+        codexGroup: loginCodexGroup,
+        codexModel: loginCodexModel,
+        codexTokenName: loginCodexTokenName,
+      })
+
+      setBaseUrl(result.baseUrl)
+      setApiKey(result.apiKey)
+      setCodexApiKey(result.codexApiKey)
+      setPersistApiKey(true)
+      setModel(result.model || DEFAULT_MODEL)
+      setTextModel(result.codexModel || DEFAULT_TEXT_MODEL)
+      await saveSettings({
+        baseUrl: result.baseUrl,
+        persistApiKey: true,
+        apiKey: result.apiKey,
+        codexApiKey: result.codexApiKey,
+        textModel: result.codexModel || DEFAULT_TEXT_MODEL,
+        themeMode,
+      })
+      setLoginPassword('')
+      setIsLoginDialogOpen(false)
+      setStatus(
+        `${result.created ? '已创建' : '已启用'} ${result.group}，${result.codexCreated ? '已创建' : '已启用'} ${result.codexGroup}`
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setStatus('中转站登录失败')
+    } finally {
+      setIsNewApiLoggingIn(false)
+    }
+  }
+
+  async function handleOptimizePrompt(promptNodeId: string) {
+    const promptNode = nodes.find((node) => node.id === promptNodeId && node.type === 'prompt')
+    const currentPrompt = getWorkflowNodePrompt(promptNode).trim()
+    const promptOptimizationPreset = getWorkflowNodePromptOptimizationPreset(promptNode)
+    if (!currentPrompt) {
+      setError('请先输入需要优化的提示词')
+      return
+    }
+    if (!codexApiKey) {
+      setError('请先点击连接配置里的登录，获取 codex 满血高速 分组秘钥')
+      setStatus('缺少提示词优化秘钥')
+      return
+    }
+
+    setError('')
+    if (optimizingPromptNodeIds.has(promptNodeId)) return
+
+    setStatus('正在优化提示词...')
+    setOptimizingPromptNodeIds((current) => new Set(current).add(promptNodeId))
+
+    try {
+      const optimizedPrompt = await bridge.optimizePrompt({
+        baseUrl,
+        apiKey: codexApiKey,
+        model: textModel.trim() || DEFAULT_TEXT_MODEL,
+        prompt: currentPrompt,
+        mode: generationMode,
+        optimizationPreset: promptOptimizationPreset,
+      })
+      const promptReferenceImages = getPromptMentionReferenceImages(
+        promptNodeId,
+        activeCanvas,
+        images
+      )
+      setPromptNodePrompt(
+        promptNodeId,
+        normalizeOptimizedPromptMentions(optimizedPrompt, promptReferenceImages)
+      )
+      setStatus('提示词已优化')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setStatus('提示词优化失败')
+    } finally {
+      setOptimizingPromptNodeIds((current) => {
+        const next = new Set(current)
+        next.delete(promptNodeId)
+        return next
+      })
+    }
+  }
+
+  async function handleOptimizeSimplePrompt() {
+    const currentPrompt = simplePrompt.trim()
+    if (!currentPrompt) {
+      setError('请先输入需要优化的图片描述')
+      return
+    }
+    if (!codexApiKey) {
+      setError('请先点击连接配置里的登录，获取 codex 满血高速 分组秘钥')
+      setStatus('缺少提示词优化秘钥')
+      return
+    }
+    if (isOptimizingSimplePrompt) return
+
+    setError('')
+    setStatus('正在优化提示词...')
+    setIsOptimizingSimplePrompt(true)
+
+    try {
+      const optimizedPrompt = await bridge.optimizePrompt({
+        baseUrl,
+        apiKey: codexApiKey,
+        model: textModel.trim() || DEFAULT_TEXT_MODEL,
+        prompt: currentPrompt,
+        mode: 'text',
+        optimizationPreset: DEFAULT_PROMPT_OPTIMIZATION_PRESET,
+      })
+      setSimplePrompt(optimizedPrompt)
+      setStatus('提示词已优化')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setStatus('提示词优化失败')
+    } finally {
+      setIsOptimizingSimplePrompt(false)
+    }
+  }
+
+  async function handleGenerate(targetGenerateNodeId?: string) {
+    const generatingCanvasId = activeCanvas?.id
+    const duplicateTitles = getDuplicateCanvasReferenceTitles(activeCanvas)
+    if (duplicateTitles.length > 0) {
+      setError(`画布内图片名称重复：${duplicateTitles.join('、')}`)
+      setStatus('请先修改重复的图片名称')
+      return
+    }
+    const generationSize = selectedGenerationSize()
+    if (!generationSize) {
+      setError('请输入 64 到 4096 之间的自定义宽高')
+      return
+    }
+    setError('')
+    setIsGenerating(true)
+    const generatedRecordsByNode = new Map<string, LocalImageRecord[]>()
+    const activeTaskIds = new Set<string>()
+    let latestTaskId = ''
+
+    const generateNodes = nodes.filter((node) => node.type === 'generate')
+    const targetNode =
+      (targetGenerateNodeId
+        ? generateNodes.find((node) => node.id === targetGenerateNodeId)
+        : generateNodes[0]) || null
+
+    try {
+      if (!targetNode) throw new Error('当前画布没有图片生成节点')
+
+      const executeGenerateNode = async (
+        generateNode: WorkflowNode,
+        visiting: Set<string>
+      ): Promise<LocalImageRecord[]> => {
+        const cachedRecords = generatedRecordsByNode.get(generateNode.id)
+        if (cachedRecords) return cachedRecords
+        if (visiting.has(generateNode.id)) {
+          throw new Error('流程图中存在图片生成循环连接，请断开循环后重试')
+        }
+
+        visiting.add(generateNode.id)
+        const promptEdge = edges.find(
+          (edge) =>
+            edge.target === generateNode.id &&
+            edge.targetHandle === 'prompt' &&
+            nodes.find((node) => node.id === edge.source)?.type === 'prompt'
+        )
+        const promptNode =
+          (promptEdge ? nodes.find((node) => node.id === promptEdge.source) : null) ||
+          nodes.find((node) => node.type === 'prompt') ||
+          null
+        if (!promptNode) throw new Error('请先创建文字描述节点并连接到图片生成节点')
+        const finalPrompt = getWorkflowNodePrompt(promptNode).trim()
+        if (!finalPrompt) throw new Error('请先输入提示词')
+
+        const upstreamGenerateEdges = edges.filter(
+          (edge) =>
+            edge.target === promptNode.id &&
+            edge.sourceHandle === 'generated-image' &&
+            (edge.targetHandle === 'reference' || edge.targetHandle?.startsWith('reference-')) &&
+            nodes.find((node) => node.id === edge.source)?.type === 'generate'
+        )
+        const upstreamReferenceImages: PromptReferenceImage[] = []
+        for (const edge of upstreamGenerateEdges) {
+          const upstreamNode = nodes.find((node) => node.id === edge.source)
+          if (!upstreamNode) continue
+          setStatus(`正在先执行上游图片生成：${upstreamNode.id}`)
+          const upstreamRecords = await executeGenerateNode(upstreamNode, visiting)
+          const firstRecord = upstreamRecords[0]
+          if (!firstRecord) continue
+          const outputTitle = getWorkflowNodeOutputTitle(upstreamNode)
+          upstreamReferenceImages.push({
+            id: `generated-${firstRecord.id}`,
+            name: `${outputTitle}.png`,
+            title: outputTitle,
+            type: 'image/png',
+            dataUrl: firstRecord.src,
+            aliases: [promptReferencePortTitle(edge.targetHandle || '')].filter(Boolean),
+          })
+        }
+
+        const promptReferenceImages = getPromptAssetReferenceImages(promptNode.id, activeCanvas)
+        const availableReferenceImages = [
+          ...promptReferenceImages,
+          ...upstreamReferenceImages,
+        ]
+        const resolvedReferences = resolvePromptReferenceImages(finalPrompt, availableReferenceImages)
+        const hasGeneratedPromptConnection = upstreamGenerateEdges.length > 0
+        const mentionsGeneratedReference = resolvedReferences.images.some((image) =>
+          upstreamReferenceImages.some((referenceImage) => referenceImage.id === image.id)
+        )
+        if (mentionsGeneratedReference && !hasGeneratedPromptConnection) {
+          throw new Error('请先把图片生成节点连接到文字描述节点，再使用 @引用生成图')
+        }
+        if (resolvedReferences.missing.length > 0) {
+          throw new Error(`没有找到这些 @参考图：${resolvedReferences.missing.join('、')}`)
+        }
+
+        const selectedStyleIds = getPromptSelectedStyleIds(promptNode.id, activeCanvas)
+        const selectedStyles = selectedStyleIds
+          .map((styleId) => styles.find((style) => style.id === styleId))
+          .filter((style): style is StyleOption => Boolean(style))
+        const submittedPrompt = promptWithStyles(finalPrompt, selectedStyles)
+        const flowReferenceImages = [...resolvedReferences.images, ...upstreamReferenceImages]
+          .filter((image, index, list) => list.findIndex((item) => item.id === image.id) === index)
+        const effectiveGenerationMode: 'text' | 'image' =
+          flowReferenceImages.length > 0 ? 'image' : 'text'
+        const referenceImageNames =
+          effectiveGenerationMode === 'image'
+            ? flowReferenceImages.map((image) => image.title || image.name)
+            : undefined
+        const generationContext = {
+          prompt: submittedPrompt,
+          model,
+          size: generationSize,
+          quality,
+          mode: effectiveGenerationMode,
+          referenceImageNames,
+          canvasId: generatingCanvasId || undefined,
+          generateNodeId: generateNode.id,
+        }
+
+        setStatus(
+          effectiveGenerationMode === 'image'
+            ? `正在执行 ${generateNode.id}，使用 ${flowReferenceImages.length} 张参考图${selectedStyles.length > 0 ? `和 ${selectedStyles.length} 个风格` : ''}...`
+            : selectedStyles.length > 0
+              ? `正在执行 ${generateNode.id}，使用 ${selectedStyles.length} 个风格...`
+              : `正在执行 ${generateNode.id}...`
+        )
+        let currentTaskId = ''
+        const result = await bridge.generateImages({
+          baseUrl,
+          apiKey,
+          mode: effectiveGenerationMode,
+          model,
+          prompt: submittedPrompt,
+          size: generationSize,
+          quality,
+          count,
+          responseFormat,
+          inputFidelity,
+          referenceImages:
+            effectiveGenerationMode === 'image' ? flowReferenceImages : undefined,
+          onTaskUpdate: (task) => {
+            currentTaskId = task.taskId
+            latestTaskId = task.taskId
+            activeTaskIds.add(task.taskId)
+            generationTaskIdsRef.current.add(task.taskId)
+            savePendingGenerationTaskRecord(task, generationContext)
+            if (generationContext.canvasId) {
+              if (task.status === 'queued' || task.status === 'running') {
+                setCanvasGenerationTask(generationContext.canvasId, task)
+              } else {
+                clearCanvasGenerationTask(generationContext.canvasId)
+              }
+            }
+            setStatus(taskStatusLabel(task.status))
+          },
+        })
+
+        if (!currentTaskId) {
+          throw new Error('任务提交成功，但没有返回任务 ID')
+        }
+        const records = await persistCompletedTaskResult(
+          currentTaskId,
+          result.images,
+          generationContext
+        )
+        generatedRecordsByNode.set(generateNode.id, records)
+        visiting.delete(generateNode.id)
+        return records
+      }
+
+      const records = await executeGenerateNode(targetNode, new Set())
+      setStatus(`已生成 ${records.length} 张图片，服务器缓存已同步到本地`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      if (latestTaskId) clearPendingGenerationTaskRecord(latestTaskId)
+      if (generatingCanvasId) clearCanvasGenerationTask(generatingCanvasId)
+      setStatus('生成失败')
+    } finally {
+      activeTaskIds.forEach((taskId) => generationTaskIdsRef.current.delete(taskId))
+      setIsGenerating(false)
+    }
+  }
+
+  function enterConfiguredView(view: AppView) {
+    if (view !== 'console' && !isConfigured) {
+      setError('')
+      setNotice({
+        id: window.performance.now(),
+        message: CONFIGURATION_NOTICE_MESSAGE,
+      })
+      setCurrentView('console')
+      return
+    }
+    setError('')
+    setNotice(null)
+    setCurrentView(view)
+  }
+
+  function enterSidebarView(view: AppView) {
+    enterConfiguredView(view)
+    setIsSidebarDrawerOpen(false)
+  }
+
+  function selectedGenerationSize() {
+    if (sizeMode === 'preset') return size
+
+    const width = Number(customSizeWidth)
+    const height = Number(customSizeHeight)
+    if (!Number.isInteger(width) || !Number.isInteger(height)) return ''
+    if (width < 64 || height < 64 || width > 4096 || height > 4096) return ''
+    return `${width}x${height}`
+  }
+
+  function handleSizeSelect(nextValue: string) {
+    if (nextValue === CUSTOM_SIZE_VALUE) {
+      const parsedSize = parseSizeValue(size)
+      if (parsedSize) {
+        setCustomSizeWidth(String(parsedSize.width))
+        setCustomSizeHeight(String(parsedSize.height))
+      }
+      setSizeMode('custom')
+      return
+    }
+
+    setSizeMode('preset')
+    setSize(nextValue)
+  }
+
+  function renderSizeField() {
+    return (
+      <div className='field size-field'>
+        <Label>尺寸</Label>
+        <Select
+          value={sizeMode === 'custom' ? CUSTOM_SIZE_VALUE : size}
+          onValueChange={handleSizeSelect}
+        >
+          <SelectTrigger className='w-full'>
+            <SelectValue placeholder='选择尺寸' />
+          </SelectTrigger>
+          <SelectContent>
+            {sizeOptions.map((item) => (
+              <SelectItem key={item.value} value={item.value}>
+                {sizeOptionLabel(item)}
+              </SelectItem>
+            ))}
+            <SelectItem value={CUSTOM_SIZE_VALUE}>自定义比例 · 手动输入</SelectItem>
+          </SelectContent>
+        </Select>
+        {sizeMode === 'custom' ? (
+          <div className='custom-size-grid'>
+            <label>
+              <span>宽</span>
+              <Input
+                type='number'
+                min='64'
+                max='4096'
+                step='1'
+                value={customSizeWidth}
+                onChange={(event) => setCustomSizeWidth(event.target.value)}
+                aria-label='自定义宽度'
+              />
+            </label>
+            <label>
+              <span>高</span>
+              <Input
+                type='number'
+                min='64'
+                max='4096'
+                step='1'
+                value={customSizeHeight}
+                onChange={(event) => setCustomSizeHeight(event.target.value)}
+                aria-label='自定义高度'
+              />
+            </label>
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  function renderModelSelect() {
+    const modelOptions =
+      sortedModels.length === 0
+        ? [{ id: model }]
+        : sortedModels.some((item) => item.id === model)
+          ? sortedModels
+          : [{ id: model }, ...sortedModels]
+
+    return (
+      <Select value={model} onValueChange={setModel}>
+        <SelectTrigger className='w-full'>
+          <SelectValue placeholder='选择模型' />
+        </SelectTrigger>
+        <SelectContent>
+          {modelOptions.map((item) => (
+            <SelectItem key={item.id} value={item.id}>
+              {item.id}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    )
+  }
+
+  function renderQualitySelect() {
+    return (
+      <Select value={quality} onValueChange={setQuality}>
+        <SelectTrigger className='w-full'>
+          <SelectValue placeholder='选择质量' />
+        </SelectTrigger>
+        <SelectContent>
+          {qualities.map((item) => (
+            <SelectItem key={item} value={item}>
+              {item}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    )
+  }
+
+  function renderCountSelect() {
+    return (
+      <Select value={String(count)} onValueChange={(value) => setCount(Number(value))}>
+        <SelectTrigger className='w-full'>
+          <SelectValue placeholder='选择数量' />
+        </SelectTrigger>
+        <SelectContent>
+          {counts.map((item) => (
+            <SelectItem key={item} value={String(item)}>
+              {item}x
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    )
+  }
+
+  async function handleSimpleGenerate() {
+    const prompt = simplePrompt.trim()
+    if (!isConfigured) {
+      setError('')
+      setCurrentView('console')
+      return
+    }
+    const generationSize = selectedGenerationSize()
+    if (!generationSize) {
+      setError('请输入 64 到 4096 之间的自定义宽高')
+      return
+    }
+    if (!prompt) {
+      setError('请先输入图片描述')
+      return
+    }
+
+    setError('')
+    setIsGenerating(true)
+    setStatus('正在生成图片...')
+
+    try {
+      const result = await bridge.generateImages({
+        baseUrl,
+        apiKey,
+        mode: 'text',
+        model,
+        prompt,
+        size: generationSize,
+        quality,
+        count,
+        responseFormat,
+        onTaskUpdate: (task) => setStatus(taskStatusLabel(task.status)),
+      })
+      const records = buildLocalImageRecords(result.images, {
+        prompt,
+        model,
+        size: generationSize,
+        quality,
+        mode: 'text',
+      })
+      await saveImages(records)
+      await refreshImages()
+      setStatus(`已生成 ${records.length} 张图片`)
+      announceGenerationComplete(records, `快速生成已完成，共 ${records.length} 张图片`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setStatus('生成失败')
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  async function handleCommerceImageFiles(kind: 'product' | 'style', files?: FileList | null) {
+    const selectedFiles = Array.from(files || [])
+    if (selectedFiles.length === 0) return
+    const invalidFile = selectedFiles.find((file) => !file.type.startsWith('image/'))
+    if (invalidFile) {
+      setError('请上传图片文件')
+      return
+    }
+
+    const limitedFiles =
+      kind === 'product'
+        ? selectedFiles.slice(0, Math.max(0, MAX_COMMERCE_PRODUCT_IMAGES - commerceProductImages.length))
+        : selectedFiles.slice(0, 1)
+    if (kind === 'product' && limitedFiles.length < selectedFiles.length) {
+      setStatus(`商品白底图最多上传 ${MAX_COMMERCE_PRODUCT_IMAGES} 张，已保留前 ${limitedFiles.length} 张`)
+    }
+    if (limitedFiles.length === 0) return
+
+    const images: ReferenceImage[] = await Promise.all(
+      limitedFiles.map(async (file, index) => ({
+        id: createLocalId(`commerce-${kind}-${index}`),
+        name: file.name,
+        title:
+          kind === 'product'
+            ? `商品白底图 ${commerceProductImages.length + index + 1}`
+            : '目标风格图',
+        type: 'image/jpeg',
+        dataUrl: await fileToCommerceReferenceDataUrl(file),
+      }))
+    )
+
+    setError('')
+    if (kind === 'product') {
+      setCommerceProductImages((current) =>
+        [...current, ...images].slice(0, MAX_COMMERCE_PRODUCT_IMAGES).map((image, index) => ({
+          ...image,
+          title: `商品白底图 ${index + 1}`,
+        }))
+      )
+    } else {
+      setCommerceStyleImage(images[0])
+    }
+  }
+
+  async function handleCommerceGenerate(kind: 'main' | 'detail') {
+    const isDetail = kind === 'detail'
+    const outputLabel = isDetail ? '电商详情图' : '电商主图'
+    if (!isConfigured) {
+      setError('')
+      setCurrentView('console')
+      return
+    }
+    const generationSize = selectedGenerationSize()
+    if (!generationSize) {
+      setError('请输入 64 到 4096 之间的自定义宽高')
+      return
+    }
+    if (commerceProductImages.length === 0) {
+      setError('请先上传至少 1 张商品白底图')
+      return
+    }
+    if (!commerceStyleImage) {
+      setError('请先上传目标风格图')
+      return
+    }
+    if (!effectiveCommerceCategoryPath) {
+      setError('请先选择完整的商品品类，或填写自定义商品品类')
+      return
+    }
+    if (!codexApiKey) {
+      setError(`请先点击连接配置里的登录，获取用于${isDetail ? '详情图' : '主图'}提示词预热的文本模型秘钥`)
+      setStatus('缺少提示词预热秘钥')
+      return
+    }
+    const description = commerceDescription.trim()
+
+    setError('')
+    setIsGenerating(true)
+    setStatus(`正在分析目标${isDetail ? '详情' : ''}风格图...`)
+
+    try {
+      let preparedPrompt = ''
+      try {
+        const promptPayload = {
+          baseUrl,
+          apiKey: codexApiKey,
+          model: textModel.trim() || DEFAULT_TEXT_MODEL,
+          description,
+          categoryPath: effectiveCommerceCategoryPath,
+          productImages: commerceProductImages,
+          styleImage: commerceStyleImage,
+        }
+        preparedPrompt = isDetail
+          ? await bridge.prepareCommerceDetailPrompt(promptPayload)
+          : await bridge.prepareCommerceMainPrompt(promptPayload)
+      } catch (promptError) {
+        const promptMessage = promptError instanceof Error ? promptError.message : String(promptError)
+        console.warn('Commerce prompt preparation failed, falling back to local prompt:', promptMessage)
+        setStatus('提示词预热失败，正在使用本地结构化提示词继续生成...')
+      }
+      const basePrompt = preparedPrompt.trim() || (isDetail ? buildCommerceDetailPrompt(description, effectiveCommerceCategoryPath) : buildCommerceMainPrompt(description, effectiveCommerceCategoryPath))
+      const prompt = buildCommerceEditPrompt(basePrompt, commerceProductImages.length, kind)
+      setStatus(
+        commerceProductImages.length > 1
+          ? '提示词预热完成，正在合成商品多角度参考图...'
+          : `提示词预热完成，正在生成${outputLabel}...`
+      )
+      const productReferenceImage = await buildCommerceProductReferenceImage(commerceProductImages)
+      const referenceImages = [productReferenceImage, commerceStyleImage]
+      setStatus(`正在生成${outputLabel}...`)
+
+      const result = await bridge.generateImages({
+        baseUrl,
+        apiKey,
+        mode: 'image',
+        model,
+        prompt,
+        size: generationSize,
+        quality,
+        count,
+        responseFormat,
+        inputFidelity,
+        referenceImages,
+        onTaskUpdate: (task) => setStatus(taskStatusLabel(task.status)),
+      })
+      const records = buildLocalImageRecords(result.images, {
+        prompt,
+        model,
+        size: generationSize,
+        quality,
+        mode: 'image',
+        referenceImageNames: referenceImages.map((image) => image.title || image.name),
+      })
+      await saveImages(records)
+      await refreshImages()
+      setStatus(`已生成 ${records.length} 张${outputLabel}`)
+      announceGenerationComplete(records, `${outputLabel}已生成完成，共 ${records.length} 张`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setStatus('生成失败')
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  async function handleDeleteImage(id: string) {
+    await deleteImage(id)
+    await refreshImages()
+  }
+
+  async function handleClearImages() {
+    await clearImages()
+    await refreshImages()
+  }
+
+  function handleDownloadImage(image: LocalImageRecord, index = 0) {
+    downloadDataUrl(image.src, `${image.id || `gpt-image-${index + 1}`}.png`)
+    setStatus('已触发图片下载；Codex 内置浏览器可能不支持下载，请在系统浏览器中打开后保存')
+  }
+
+  function handleCreateCanvas() {
+    const nextCanvas = createWorkflowCanvas(canvases.length + 1)
+    setCanvases((currentCanvases) => [...currentCanvases, nextCanvas])
+    setActiveCanvasId(nextCanvas.id)
+    setPaneMenu(null)
+    setStatus(`${nextCanvas.name} 已创建`)
+  }
+
+  function handleDuplicateCanvas(id: string) {
+    const sourceCanvas = canvases.find((canvas) => canvas.id === id)
+    if (!sourceCanvas) return
+
+    const nextCanvas = createWorkflowCanvas(canvases.length + 1, sourceCanvas)
+    setCanvases((currentCanvases) => [...currentCanvases, nextCanvas])
+    setActiveCanvasId(nextCanvas.id)
+    setPaneMenu(null)
+    setStatus(`${sourceCanvas.name} 已复制`)
+  }
+
+  function handleDeleteCanvas(id: string) {
+    if (canvases.length <= 1) {
+      setStatus('至少保留一个画布')
+      return
+    }
+
+    const deletedIndex = canvases.findIndex((canvas) => canvas.id === id)
+    const nextCanvases = canvases.filter((canvas) => canvas.id !== id)
+    setCanvases(nextCanvases)
+    removePendingGenerationTasksByCanvasId(id)
+
+    if (id === activeCanvasId) {
+      const nextActive =
+        nextCanvases[Math.max(0, deletedIndex - 1)] || nextCanvases[0]
+      if (nextActive) setActiveCanvasId(nextActive.id)
+    }
+
+    setPaneMenu(null)
+    setStatus('画布已删除')
+  }
+
+  function handleRenameCanvas(id: string, nextName: string) {
+    const normalizedName = nextName.slice(0, 32)
+    const targetCanvas = canvases.find((canvas) => canvas.id === id)
+    if (targetCanvas) pushWorkflowHistorySnapshot(targetCanvas)
+    setCanvases((currentCanvases) =>
+      currentCanvases.map((canvas) =>
+        canvas.id === id
+          ? { ...canvas, name: normalizedName, updatedAt: Date.now() }
+          : canvas
+      )
+    )
+  }
+
+  function handleCommitCanvasName(id: string) {
+    const canvas = canvases.find((item) => item.id === id)
+    if (!canvas) return
+
+    const nextName = canvas.name.trim() || '未命名画布'
+    if (nextName !== canvas.name) handleRenameCanvas(id, nextName)
+    setStatus(`${nextName} 已命名`)
+  }
+
+  function stopCanvasNameShortcut(event: ReactKeyboardEvent<HTMLInputElement>) {
+    event.stopPropagation()
+    if (event.key === 'Enter') {
+      event.currentTarget.blur()
+    }
+  }
+
+  const deleteWorkflowNode = useCallback(
+    (id: string) => {
+      setNodes((currentNodes) => currentNodes.filter((node) => node.id !== id))
+      setEdges((currentEdges) =>
+        currentEdges.filter((edge) => edge.source !== id && edge.target !== id)
+      )
+      setStatus('节点已删除')
+    },
+    [setEdges, setNodes]
+  )
+
+  function nodeDataFor(
+    node: WorkflowNode,
+    previousData?: WorkflowNode['data']
+  ): WorkflowNode['data'] {
+    const type = node.type as WorkflowNodeType
+
+    if (type === 'asset') {
+      const nodeReferenceImages = getWorkflowNodeReferenceImages(node)
+      const previousAssetData = previousData as AssetNodeData | undefined
+
+      if (
+        previousAssetData &&
+        areReferenceImagesEqual(previousAssetData.referenceImages, nodeReferenceImages)
+      ) {
+        return previousAssetData
+      }
+
+      return {
+        onDeleteNode: deleteWorkflowNode,
+        referenceImages: nodeReferenceImages,
+        addReferenceFiles: (files: FileList | File[]) => addReferenceFiles(node.id, files),
+        removeReferenceImage: (id: string) => removeReferenceImage(node.id, id),
+        updateReferenceImageTitle: (id: string, title: string) =>
+          updateReferenceImageTitle(node.id, id, title),
+        isReferenceTitleDuplicate: (id: string) => {
+          const image = nodeReferenceImages.find((item) => item.id === id)
+          if (!image) return false
+          return isReferenceTitleTaken(
+            activeCanvas,
+            image.title || image.name,
+            referenceImageOwnerId(id)
+          )
+        },
+      }
+    }
+
+    if (type === 'prompt') {
+      const nodePrompt = getWorkflowNodePrompt(node)
+      const nodePromptOptimizationPreset = getWorkflowNodePromptOptimizationPreset(node)
+      const promptReferenceImages = getPromptMentionReferenceImages(node.id, activeCanvas, images)
+      const promptReferencePorts = edges
+        .filter((edge) => edge.target === node.id)
+        .map((edge) => {
+          const handleId = edge.targetHandle || ''
+          const referenceIndex = PROMPT_REFERENCE_HANDLE_IDS.indexOf(handleId)
+          return {
+            id: handleId || edge.id,
+            title:
+              handleId === 'style'
+                ? '风格输入'
+                : referenceIndex >= 0
+                  ? `参考图输入 ${referenceIndex + 1}`
+                  : edge.data?.label || handleId || '输入端口',
+          }
+        })
+      const isPromptOptimizing = optimizingPromptNodeIds.has(node.id)
+
+      return {
+        onDeleteNode: deleteWorkflowNode,
+        prompt: nodePrompt,
+        setPrompt: (updater: StateUpdater<string>) => setPromptNodePrompt(node.id, updater),
+        referenceImages: promptReferenceImages,
+        referencePorts: promptReferencePorts,
+        optimizationPreset: nodePromptOptimizationPreset,
+        optimizationPresets: promptOptimizationPresets,
+        setOptimizationPreset: (preset: PromptOptimizationPreset) =>
+          setPromptNodeOptimizationPreset(node.id, preset),
+        generationMode,
+        isOptimizingPrompt: isPromptOptimizing,
+        canOptimizePrompt: Boolean(nodePrompt.trim()) && Boolean(codexApiKey) && !isPromptOptimizing,
+        onOptimizePrompt: () => void handleOptimizePrompt(node.id),
+      }
+    }
+
+    if (type === 'style') {
+      return {
+        onDeleteNode: deleteWorkflowNode,
+        styles,
+        categories: styleCategories,
+        selectedStyleId: getWorkflowNodeSelectedStyleId(node),
+        setSelectedStyleId: (id: string) => setStyleNodeSelection(node.id, id),
+        isLoadingStyles,
+      }
+    }
+
+    if (type === 'generate') {
+      const promptEdge = edges.find(
+        (edge) =>
+          edge.target === node.id &&
+          edge.targetHandle === 'prompt' &&
+          nodes.find((item) => item.id === edge.source)?.type === 'prompt'
+      )
+      const promptNode =
+        (promptEdge ? nodes.find((item) => item.id === promptEdge.source) : null) ||
+        nodes.find((item) => item.type === 'prompt') ||
+        null
+      const canGenerateNode =
+        !activeCanvasGenerating &&
+        Boolean(apiKey && baseUrl && model && getWorkflowNodePrompt(promptNode).trim())
+      const activeSize = selectedGenerationSize() || size
+      const workflowSizes = sizes.includes(activeSize) ? sizes : [activeSize, ...sizes]
+
+      return {
+        onDeleteNode: deleteWorkflowNode,
+        model,
+        sortedModels,
+        setModel,
+        size: activeSize,
+        sizes: workflowSizes,
+        setSize: (nextSize: string) => {
+          setSizeMode('preset')
+          setSize(nextSize)
+        },
+        quality,
+        qualities,
+        setQuality,
+        count,
+        counts,
+        setCount,
+        responseFormat,
+        setResponseFormat,
+        inputFidelity,
+        inputFidelities,
+        setInputFidelity,
+        generationMode,
+        isGenerating: activeCanvasGenerating,
+        canGenerate: canGenerateNode,
+        onGenerate: () => void handleGenerate(node.id),
+        image: images.find((image) => image.id === getWorkflowNodeLatestImageId(node)) || null,
+        outputTitle: getWorkflowNodeOutputTitle(node),
+        updateOutputTitle: (title: string) => updateGenerateNodeOutputTitle(node.id, title),
+        isOutputTitleDuplicate: isReferenceTitleTaken(
+          activeCanvas,
+          getWorkflowNodeOutputTitle(node),
+          generateOutputOwnerId(node.id)
+        ),
+        onPreview: setPreviewImage,
+        onDownload: handleDownloadImage,
+      }
+    }
+
+    return { onDeleteNode: deleteWorkflowNode }
+  }
+
+  const workflowNodes = useMemo<WorkflowNode[]>(() => {
+    const previousNodeDataMap = workflowNodeDataCacheRef.current
+    const nextNodeDataMap: WorkflowNodeDataMap = {}
+
+    const nextWorkflowNodes = nodes.map((node) => {
+      const nextData = nodeDataFor(node, previousNodeDataMap[node.id])
+      nextNodeDataMap[node.id] = nextData
+      return {
+        ...node,
+        data: nextData,
+      }
+    })
+
+    workflowNodeDataCacheRef.current = nextNodeDataMap
+    return nextWorkflowNodes
+  }, [
+      nodes,
+      edges,
+      generationMode,
+      referenceImages,
+      apiKey,
+      baseUrl,
+      codexApiKey,
+      textModel,
+      optimizingPromptNodeIds,
+      styles,
+      styleCategories,
+      isLoadingStyles,
+      setStyleNodeSelection,
+      model,
+      sortedModels,
+      size,
+      sizeMode,
+      customSizeWidth,
+      customSizeHeight,
+      quality,
+      count,
+      responseFormat,
+      inputFidelity,
+      images,
+      activeCanvas,
+      activeCanvasGenerating,
+      deleteWorkflowNode,
+      setPromptNodePrompt,
+      setPromptNodeOptimizationPreset,
+    ])
+
+  const workflowEdges = useMemo<WorkflowEdge[]>(
+    () =>
+      edges.map((edge) => ({
+        ...edge,
+        type: 'blueprint',
+        data: {
+          ...edge.data,
+          label:
+            edge.data?.label ||
+            (edge.source.startsWith('asset')
+              ? '参考图 -> 文字描述'
+              : edge.source.startsWith('style')
+                ? '风格 -> 文字描述'
+              : edge.source.startsWith('generate')
+                ? '生成图 -> 文字描述'
+                : '提示词 -> 图片生成'),
+        },
+        animated: activeCanvasGenerating && edge.source.includes('generate'),
+      })),
+    [activeCanvasGenerating, edges]
+  )
+
+  const isValidConnection: IsValidConnection<WorkflowEdge> = useCallback(
+    (connection) => {
+      const source = nodes.find((node) => node.id === connection.source)
+      const target = nodes.find((node) => node.id === connection.target)
+      if (!source || !target) return false
+      if (source.id === target.id) return false
+
+      if (source.type === 'asset') {
+        const targetHandle = connection.targetHandle || ''
+        return (
+          target.type === 'prompt' &&
+          connection.sourceHandle === 'reference' &&
+          PROMPT_REFERENCE_HANDLE_IDS.includes(targetHandle)
+        )
+      }
+
+      if (source.type === 'style') {
+        return (
+          target.type === 'prompt' &&
+          connection.sourceHandle === 'style' &&
+          connection.targetHandle === 'style'
+        )
+      }
+
+      if (source.type === 'prompt') {
+        return (
+          target.type === 'generate' &&
+          connection.sourceHandle === 'prompt' &&
+          connection.targetHandle === 'prompt'
+        )
+      }
+
+      if (source.type === 'generate') {
+        const targetHandle = connection.targetHandle || ''
+        return (
+          target.type === 'prompt' &&
+          connection.sourceHandle === 'generated-image' &&
+          PROMPT_REFERENCE_HANDLE_IDS.includes(targetHandle)
+        )
+      }
+
+      return false
+    },
+    [nodes]
+  )
+
+  const onConnect = useCallback(
+    (connection: Connection) => {
+      if (!isValidConnection(connection)) {
+        setStatus('这个端口不能这样连接')
+        return
+      }
+
+      const sourceType = connection.source?.split('-')[0]
+      const label =
+        sourceType === 'asset'
+          ? '参考图 -> 文字描述'
+          : sourceType === 'style'
+            ? '风格 -> 文字描述'
+            : sourceType === 'generate'
+              ? '生成图 -> 文字描述'
+              : '提示词 -> 图片生成'
+      const className =
+        sourceType === 'asset'
+          ? 'edge-blue'
+          : sourceType === 'style'
+            ? 'edge-green'
+            : sourceType === 'prompt'
+              ? 'edge-violet'
+              : 'edge-pink'
+
+      setEdges((currentEdges) => {
+        const withoutPreviousInput = currentEdges.filter(
+          (edge) =>
+            !(
+              edge.target === connection.target &&
+              edge.targetHandle === connection.targetHandle
+            )
+        )
+
+        return addEdge(
+          {
+            ...connection,
+            type: 'blueprint',
+            id: `${connection.source}-${connection.sourceHandle || 'out'}-${connection.target}-${connection.targetHandle || 'in'}-${Date.now()}`,
+            className,
+            animated: false,
+            data: { label },
+          },
+          withoutPreviousInput
+        )
+      })
+      setPaneMenu(null)
+      setStatus(`${label} 已连接`)
+    },
+    [isValidConnection, setEdges]
+  )
+
+  const handlePaneContextMenu = useCallback(
+    (event: ReactMouseEvent<Element> | globalThis.MouseEvent) => {
+      event.preventDefault()
+      const currentTarget =
+        'currentTarget' in event && event.currentTarget
+          ? (event.currentTarget as HTMLDivElement)
+          : null
+      const bounds = currentTarget?.getBoundingClientRect()
+      const position = flowInstance
+        ? flowInstance.screenToFlowPosition({
+            x: event.clientX,
+            y: event.clientY,
+          })
+        : {
+            x: event.clientX - (bounds?.left || 0),
+            y: event.clientY - (bounds?.top || 0),
+          }
+      const menuGap = 6
+      const menuWidth = 190
+      const menuHeight = 210
+      const viewportWidth = typeof window === 'undefined' ? 0 : window.innerWidth
+      const viewportHeight = typeof window === 'undefined' ? 0 : window.innerHeight
+      let menuX = event.clientX + menuGap
+      let menuY = event.clientY
+
+      if (viewportWidth && menuX + menuWidth > viewportWidth - menuGap) {
+        menuX = Math.max(menuGap, event.clientX - menuWidth - menuGap)
+      }
+
+      if (viewportHeight && menuY + menuHeight > viewportHeight - menuGap) {
+        menuY = Math.max(menuGap, viewportHeight - menuHeight - menuGap)
+      }
+
+      setPaneMenu({
+        x: menuX,
+        y: menuY,
+        position,
+      })
+    },
+    [flowInstance]
+  )
+
+  function addWorkflowNodeAt(type: WorkflowNodeType, position: { x: number; y: number }) {
+    const id = `${type}-${Date.now()}`
+    setNodes((currentNodes) => {
+      const data =
+        type === 'style' && styles[0]
+          ? { selectedStyleId: styles[0].id }
+          : type === 'generate'
+            ? {
+                outputTitle: createUniqueReferenceTitle(
+                  `生成图${currentNodes.filter((node) => node.type === 'generate').length + 1}`,
+                  getCanvasReferenceNameEntries({ nodes: currentNodes })
+                ),
+              }
+            : {}
+
+      return [
+        ...currentNodes,
+        {
+          id,
+          type,
+          position,
+          data,
+        },
+      ]
+    })
+    setPaneMenu(null)
+    setStatus('已创建节点，拖动端口可连线')
+  }
+
+  function addWorkflowNode(type: WorkflowNodeType) {
+    if (!paneMenu) return
+    addWorkflowNodeAt(type, paneMenu.position)
+  }
+
+  const portalViewMeta: Record<AppView, { title: string; description: string }> = {
+    home: {
+      title: '快速生成',
+      description: '用提示词和参数快速完成生图，结果自动进入图库管理。',
+    },
+    commerce: {
+      title: '电商主题',
+      description: '上传商品白底图和目标风格图，选择主图或详情图后生成。',
+    },
+    console: {
+      title: '控制台',
+      description: '管理连接、模型和本地数据导入导出。',
+    },
+    gallery: {
+      title: '图库',
+      description: '集中管理本地生成结果，预览、下载和删除都在这里完成。',
+    },
+    workflow: {
+      title: '工作流',
+      description: '用节点组织参考图、提示词和生成任务，搭建可复用的生图流程。',
+    },
+  }
+  const portalMeta = portalViewMeta[currentView]
+  const commerceThemeMenu = (
+    <div className='sidebar-nav-group ecommerce-nav-group'>
+      <button
+        type='button'
+        className={currentView === 'commerce' ? 'active' : ''}
+        onClick={() => enterSidebarView('commerce')}
+        aria-label='电商主题'
+        title='电商主题'
+      >
+        <ShoppingBag size={16} />
+        电商主题
+      </button>
+    </div>
+  )
+  const commerceCanGenerate =
+    isConfigured &&
+    commerceProductImages.length > 0 &&
+    Boolean(commerceStyleImage) &&
+    Boolean(effectiveCommerceCategoryPath)
+  const isCommerceView = currentView === 'commerce'
+  const commerceCopy = commerceGenerateKind === 'detail'
+    ? {
+        title: '详情图制作',
+        styleLabel: '详情风格图',
+        styleHint: '上传你喜欢的详情页风格，用于参考版式、分区、背景、光线和文字排版。',
+        descriptionLabel: '卖点描述（可选）',
+        descriptionPlaceholder: '可简单写商品卖点、详情页短文案或需要替换的文字；留空时会根据详情风格图自动生成提示词',
+        action: '生成详情图',
+      }
+    : {
+        title: '主图制作',
+        styleLabel: '目标风格图',
+        styleHint: '上传你喜欢的主图风格，用于参考光线、背景和构图。',
+        descriptionLabel: '文字描述（可选）',
+        descriptionPlaceholder: '可简单写卖点、文案或替换文字；留空时会根据目标风格图自动生成主图提示词',
+        action: '生成主图',
+      }
+  const renderCommerceKindField = () => (
+    <div className='commerce-kind-field' aria-label='生成类型'>
+      <div className='commerce-kind-copy'>
+        <strong>生成类型</strong>
+        <span>同一套素材和品类信息，在生成前选择主图或详情图</span>
+      </div>
+      <div className='commerce-kind-toggle' role='group' aria-label='选择生成类型'>
+        <button
+          type='button'
+          className={commerceGenerateKind === 'main' ? 'active' : ''}
+          onClick={() => setCommerceGenerateKind('main')}
+          aria-pressed={commerceGenerateKind === 'main'}
+        >
+          <ImageIcon size={15} />
+          主图
+        </button>
+        <button
+          type='button'
+          className={commerceGenerateKind === 'detail' ? 'active' : ''}
+          onClick={() => setCommerceGenerateKind('detail')}
+          aria-pressed={commerceGenerateKind === 'detail'}
+        >
+          <Layers size={15} />
+          详情图
+        </button>
+      </div>
+    </div>
+  )
+  const renderCommerceCategoryField = () => (
+    <div className='commerce-category-field' aria-label='商品品类'>
+      <div className='commerce-category-heading'>
+        <strong>商品品类</strong>
+        <span>预设类目和自定义类目二选一，生成时会作为提示词强约束</span>
+      </div>
+      <div className='commerce-category-mode' role='group' aria-label='选择类目来源'>
+        <button
+          type='button'
+          className={commerceCategoryMode === 'preset' ? 'active' : ''}
+          onClick={() => {
+            setCommerceCategoryMode('preset')
+            setCommerceCustomCategory('')
+          }}
+          aria-pressed={commerceCategoryMode === 'preset'}
+        >
+          预设类目
+        </button>
+        <button
+          type='button'
+          className={commerceCategoryMode === 'custom' ? 'active' : ''}
+          onClick={() => {
+            setCommerceCategoryMode('custom')
+            setCommerceCategoryLevel1('')
+            setCommerceCategoryLevel2('')
+            setCommerceCategoryLevel3('')
+          }}
+          aria-pressed={commerceCategoryMode === 'custom'}
+        >
+          自定义类目
+        </button>
+      </div>
+      <div className='commerce-category-grid'>
+        <label className='field'>
+          <span>一级类目</span>
+          <Select
+            value={commerceCategoryLevel1}
+            disabled={commerceCategoryMode === 'custom'}
+            onValueChange={(value) => {
+              setCommerceCategoryLevel1(value)
+              setCommerceCategoryLevel2('')
+              setCommerceCategoryLevel3('')
+            }}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder='选择一级类目' />
+            </SelectTrigger>
+            <SelectContent>
+            {commerceCategoryTree.map((category) => (
+              <SelectItem key={category.name} value={category.name}>
+                {category.name}
+              </SelectItem>
+            ))}
+            </SelectContent>
+          </Select>
+        </label>
+        <label className='field'>
+          <span>二级类目</span>
+          <Select
+            value={commerceCategoryLevel2}
+            disabled={commerceCategoryMode === 'custom' || !commerceCategoryLevel1}
+            onValueChange={(value) => {
+              setCommerceCategoryLevel2(value)
+              setCommerceCategoryLevel3('')
+            }}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder='选择二级类目' />
+            </SelectTrigger>
+            <SelectContent>
+            {commerceCategoryLevel2Options.map((category) => (
+              <SelectItem key={category.name} value={category.name}>
+                {category.name}
+              </SelectItem>
+            ))}
+            </SelectContent>
+          </Select>
+        </label>
+        <label className='field'>
+          <span>三级类目</span>
+          <Select
+            value={commerceCategoryLevel3}
+            disabled={commerceCategoryMode === 'custom' || !commerceCategoryLevel2}
+            onValueChange={setCommerceCategoryLevel3}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder='选择三级类目' />
+            </SelectTrigger>
+            <SelectContent>
+            {commerceCategoryLevel3Options.map((category) => (
+              <SelectItem key={category.name} value={category.name}>
+                {category.name}
+              </SelectItem>
+            ))}
+            </SelectContent>
+          </Select>
+        </label>
+      </div>
+      <label className='field commerce-custom-category'>
+        <span>自定义类目</span>
+        <Input
+          value={commerceCustomCategory}
+          disabled={commerceCategoryMode === 'preset'}
+          onChange={(event) => setCommerceCustomCategory(event.target.value)}
+          placeholder='例如：食品饮料 / 地方特产 / 手工锅巴，或直接写“户外露营咖啡器具”'
+        />
+      </label>
+    </div>
+  )
+  const renderCommerceUpload = (
+    kind: 'product' | 'style',
+    label: string,
+    hint: string,
+    images: ReferenceImage[]
+  ) => (
+    <div className={`commerce-upload ${images.length > 0 ? 'filled' : ''}`}>
+      <div className='commerce-upload-copy'>
+        <strong>{label}</strong>
+        <span>{hint}</span>
+      </div>
+      {images.length > 0 ? (
+        <div className='commerce-upload-preview-list'>
+          {images.map((image, index) => (
+            <div className='commerce-upload-preview' key={image.id}>
+              <img src={image.dataUrl} alt={kind === 'product' ? `${label} ${index + 1}` : label} />
+              <div>
+                <strong>{image.name}</strong>
+                <span>{kind === 'product' ? `角度 ${index + 1} · ` : ''}{image.type || '图片文件'}</span>
+              </div>
+              <Button
+                type='button'
+                variant='ghost'
+                size='icon'
+                className='ghost'
+                onClick={() => {
+                  if (kind === 'product') {
+                    setCommerceProductImages((current) =>
+                      current
+                        .filter((item) => item.id !== image.id)
+                        .map((item, itemIndex) => ({
+                          ...item,
+                          title: `商品白底图 ${itemIndex + 1}`,
+                        }))
+                    )
+                  } else {
+                    setCommerceStyleImage(null)
+                  }
+                }}
+                aria-label={`移除${kind === 'product' ? `${label} ${index + 1}` : label}`}
+              >
+                <X size={15} />
+              </Button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <label
+        className={`secondary commerce-file-action ${
+          kind === 'product' && images.length >= MAX_COMMERCE_PRODUCT_IMAGES ? 'disabled' : ''
+        }`}
+        aria-disabled={kind === 'product' && images.length >= MAX_COMMERCE_PRODUCT_IMAGES}
+      >
+        <Upload size={15} />
+        {kind === 'product'
+          ? images.length >= MAX_COMMERCE_PRODUCT_IMAGES
+            ? `已达上限（${MAX_COMMERCE_PRODUCT_IMAGES}/${MAX_COMMERCE_PRODUCT_IMAGES}）`
+            : images.length > 0
+            ? `继续上传（${images.length}/${MAX_COMMERCE_PRODUCT_IMAGES}）`
+            : `上传图片（最多 ${MAX_COMMERCE_PRODUCT_IMAGES} 张）`
+          : images.length > 0
+            ? '替换图片'
+            : '上传图片'}
+        <input
+          type='file'
+          accept='image/*'
+          multiple={kind === 'product'}
+          disabled={kind === 'product' && images.length >= MAX_COMMERCE_PRODUCT_IMAGES}
+          onChange={(event) => {
+            void handleCommerceImageFiles(kind, event.target.files)
+            event.target.value = ''
+          }}
+        />
+      </label>
+    </div>
+  )
+
+  return (
+    <div
+      className={`app-shell portal-shell ${currentView === 'workflow' ? 'workflow-shell' : ''}`}
+      data-theme={resolvedTheme}
+    >
+      {notice ? (
+        <div className='app-notice' role='status' aria-live='polite'>
+          <KeyRound size={16} aria-hidden='true' />
+          <div>
+            <strong>需要先完成连接配置</strong>
+            <span>{notice.message}</span>
+          </div>
+          <button type='button' onClick={() => setNotice(null)} aria-label='关闭配置提示'>
+            <X size={14} />
+          </button>
+        </div>
+      ) : null}
+
+      {completionNotice ? (
+        <div className='app-notice success-notice' role='status' aria-live='polite'>
+          <CheckCircle2 size={16} aria-hidden='true' />
+          <div>
+            <strong>生成完成</strong>
+            <span>{completionNotice.message}</span>
+          </div>
+          <div className='notice-actions'>
+            <button
+              type='button'
+              onClick={() => {
+                setCompletionNotice(null)
+                enterSidebarView('gallery')
+              }}
+            >
+              <Images size={14} />
+              查看图库
+            </button>
+            <button type='button' onClick={() => setCompletionNotice(null)} aria-label='关闭生成完成提示'>
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {currentView === 'workflow' ? (
+        <SidebarProvider>
+          <AppDashboardSidebar
+            currentView={currentView}
+            isConfigured={isConfigured}
+            model={model}
+            themeMode={themeMode}
+            onNavigate={enterSidebarView}
+            onThemeChange={(mode) => void handleThemeChange(mode)}
+          />
+          <SidebarInset className='dashboard-shell'>
+            <header className='dashboard-header'>
+              <div className='flex h-full items-center gap-2'>
+                <SidebarTrigger className='-ml-1' />
+                <Separator orientation='vertical' className='mx-2 h-full' />
+                <div className='workspace-title'>
+                  <h1>{portalMeta.title}</h1>
+                  <p>{portalMeta.description}</p>
+                </div>
+              </div>
+            </header>
+            <main className='dashboard-workflow-content'>
+              <section className='workflow-workspace dashboard-workflow-workspace'>
+                <main className='workflow-stage'>
+          <aside
+            className={`canvas-drawer workflow-canvas-panel ${isCanvasDrawerOpen ? 'drawer-open' : 'drawer-collapsed'}`}
+            aria-label='画布列表'
+          >
+            <button
+              type='button'
+              className='workflow-canvas-drawer-toggle'
+              onClick={() => {
+                hasManuallyToggledCanvasDrawerRef.current = true
+                setIsCanvasDrawerOpen((current) => !current)
+              }}
+              aria-expanded={isCanvasDrawerOpen}
+              title={isCanvasDrawerOpen ? '收起画布' : '展开画布'}
+            >
+              {isCanvasDrawerOpen ? <X size={17} /> : <Layers size={17} />}
+              <span>画布</span>
+            </button>
+            <div className='workflow-canvas-drawer-content'>
+              <div className='canvas-drawer-header'>
+                <div className='section-title'>
+                  <Layers size={16} />
+                  <span>画布</span>
+                </div>
+                <Button type='button' variant='ghost' size='icon' className='icon-button' onClick={handleCreateCanvas} aria-label='新建画布' title='新建画布'>
+                  <Plus size={17} />
+                </Button>
+              </div>
+
+              {activeCanvas ? (
+                <label className='canvas-title-bar'>
+                  <Edit3 size={15} />
+                  <input
+                    value={activeCanvas.name}
+                    onChange={(event) => handleRenameCanvas(activeCanvas.id, event.target.value)}
+                    onBlur={() => handleCommitCanvasName(activeCanvas.id)}
+                    onKeyDown={stopCanvasNameShortcut}
+                    aria-label='当前画布名称'
+                    placeholder='未命名画布'
+                  />
+                </label>
+              ) : null}
+
+              <div className='canvas-list'>
+                {canvases.map((canvas) => (
+                  <article
+                    key={canvas.id}
+                    className={`canvas-item ${canvas.id === activeCanvas?.id ? 'active' : ''}`}
+                  >
+                    <div
+                      className='canvas-switch'
+                      onClick={() => {
+                        setActiveCanvasId(canvas.id)
+                        setPaneMenu(null)
+                        setStatus(`已切换到 ${canvas.name}`)
+                      }}
+                    >
+                      <label className='canvas-name-field'>
+                        <span>画布名称</span>
+                        <input
+                          value={canvas.name}
+                          onChange={(event) => handleRenameCanvas(canvas.id, event.target.value)}
+                          onBlur={() => handleCommitCanvasName(canvas.id)}
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDown={stopCanvasNameShortcut}
+                          aria-label={`修改 ${canvas.name || '画布'} 名称`}
+                          placeholder='未命名画布'
+                        />
+                      </label>
+                      <div className='canvas-switch-meta'>
+                        <span>
+                        {canvas.nodes.length} 节点 · {canvas.edges.length} 连接
+                        </span>
+                        {isCanvasGenerating(canvas) ? (
+                          <span className='canvas-generation-state'>
+                            <Loader2 className='spin' size={12} />
+                            生成中
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className='canvas-actions'>
+                      <button
+                        type='button'
+                        onClick={() => handleDuplicateCanvas(canvas.id)}
+                        aria-label={`复制 ${canvas.name}`}
+                        title='复制画布'
+                      >
+                        <Copy size={14} />
+                      </button>
+                      <button
+                        type='button'
+                        onClick={() => handleDeleteCanvas(canvas.id)}
+                        disabled={canvases.length <= 1}
+                        aria-label={`删除 ${canvas.name}`}
+                        title='删除画布'
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+          </aside>
+        <ReactFlow
+          key={activeCanvas?.id}
+          nodes={workflowNodes}
+          edges={workflowEdges}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          fitView
+          minZoom={0.45}
+          maxZoom={1.35}
+          defaultViewport={{ x: 120, y: 80, zoom: 0.76 }}
+          onlyRenderVisibleElements
+          panOnDrag
+          zoomOnScroll
+          zoomOnPinch
+          nodesDraggable
+          nodesConnectable
+          elementsSelectable
+          elevateEdgesOnSelect
+          deleteKeyCode={['Backspace', 'Delete']}
+          isValidConnection={isValidConnection}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onConnect={onConnect}
+          onInit={setFlowInstance}
+          onPaneClick={() => setPaneMenu(null)}
+          onPaneContextMenu={handlePaneContextMenu}
+        >
+          <Background
+            color={resolvedTheme === 'light' ? 'rgba(68,64,60,.12)' : 'rgba(245,245,244,.10)'}
+            gap={48}
+            size={1}
+          />
+          <Controls showInteractive={false} />
+        </ReactFlow>
+
+        {paneMenu ? (
+          <div
+            className='pane-menu'
+            style={{ left: paneMenu.x, top: paneMenu.y }}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <strong>创建节点</strong>
+            <button type='button' onClick={() => addWorkflowNode('asset')}>
+              普通节点 · 参考图片
+            </button>
+            <button type='button' onClick={() => addWorkflowNode('prompt')}>
+              普通节点 · 文字描述
+            </button>
+            <button type='button' onClick={() => addWorkflowNode('style')}>
+              标签节点 · 选择风格
+            </button>
+            <button type='button' onClick={() => addWorkflowNode('generate')}>
+              工作节点 · 图片生成
+            </button>
+          </div>
+        ) : null}
+
+        {error ? (
+          <div className='error-toast' role='alert'>
+            <strong>执行失败</strong>
+            <span>{error}</span>
+            <button type='button' onClick={() => setError('')} aria-label='关闭错误提示'>
+              <X size={15} />
+            </button>
+          </div>
+        ) : null}
+
+                </main>
+              </section>
+            </main>
+          </SidebarInset>
+        </SidebarProvider>
+      ) : (
+        <SidebarProvider>
+          <AppDashboardSidebar
+            currentView={currentView}
+            isConfigured={isConfigured}
+            model={model}
+            themeMode={themeMode}
+            onNavigate={enterSidebarView}
+            onThemeChange={(mode) => void handleThemeChange(mode)}
+          />
+          <SidebarInset className='dashboard-shell'>
+            <header className='dashboard-header'>
+              <div className='flex h-full items-center gap-2'>
+                <SidebarTrigger className='-ml-1' />
+                <Separator orientation='vertical' className='mx-2 h-full' />
+                <div className='workspace-title'>
+                  <h1>{portalMeta.title}</h1>
+                  <p>{portalMeta.description}</p>
+                </div>
+              </div>
+            </header>
+            <main className={`dashboard-content ${currentView === 'gallery' ? 'gallery-workspace' : ''}`}>
+
+          {currentView === 'home' ? (
+            <section className='launchpad'>
+              <div className='workbench-grid'>
+                <Card className='workbench-composer dashboard-card'>
+                  <CardHeader>
+                    <CardTitle>
+                      <span className='inline-flex items-center gap-2'>
+                        <ImageIcon size={16} />
+                        快速生成
+                      </span>
+                    </CardTitle>
+                    <CardDescription>用提示词和参数快速完成生图</CardDescription>
+                  </CardHeader>
+                  <CardContent className='dashboard-card-content'>
+                  <div className='field'>
+                    <Label>图片描述</Label>
+                    <Textarea
+                      className='simple-prompt'
+                      value={simplePrompt}
+                      onChange={(event) => setSimplePrompt(event.target.value)}
+                      placeholder='例如：一张高级科技产品海报，干净背景，清晰主视觉，真实材质，高级棚拍光线'
+                    />
+                  </div>
+                  <div className='simple-param-grid'>
+                    <div className='field'>
+                      <Label>模型</Label>
+                      {renderModelSelect()}
+                    </div>
+                    {renderSizeField()}
+                    <div className='field'>
+                      <Label>质量</Label>
+                      {renderQualitySelect()}
+                    </div>
+                    <div className='field'>
+                      <Label>数量</Label>
+                      {renderCountSelect()}
+                    </div>
+                  </div>
+                  </CardContent>
+                  <CardFooter className='simple-actions dashboard-card-footer'>
+                    <Button
+                      type='button'
+                      variant='secondary'
+                      className='secondary simple-optimize-action'
+                      onClick={() => void handleOptimizeSimplePrompt()}
+                      disabled={isGenerating || isOptimizingSimplePrompt || !simplePrompt.trim()}
+                    >
+                      {isOptimizingSimplePrompt ? (
+                        <Loader2 className='spin' size={16} />
+                      ) : (
+                        <Edit3 size={16} />
+                      )}
+                      {isOptimizingSimplePrompt ? '优化中' : '优化提示词'}
+                    </Button>
+                    <Button
+                      type='button'
+                      className='primary-action'
+                      onClick={() => void handleSimpleGenerate()}
+                      disabled={isGenerating || !isConfigured || !simplePrompt.trim()}
+                    >
+                      {isGenerating ? <Loader2 className='spin' size={16} /> : <Sparkles size={16} />}
+                      {isConfigured ? (isGenerating ? '生成中' : '立即生成') : '先完成配置'}
+                    </Button>
+                  </CardFooter>
+                </Card>
+
+                <Card className='recent-home-panel dashboard-card'>
+                  <CardHeader className='recent-home-header'>
+                    <CardTitle>
+                      <span className='inline-flex items-center gap-2'>
+                        <Images size={16} />
+                        最近生成
+                      </span>
+                    </CardTitle>
+                    <CardDescription>最近 5 张本地结果</CardDescription>
+                    <CardAction className='recent-home-meta'>
+                      <Badge variant='secondary'>{Math.min(images.length, 5)} / 5</Badge>
+                      <Button
+                        type='button'
+                        variant='secondary'
+                        className='secondary'
+                        onClick={() => enterSidebarView('gallery')}
+                      >
+                        查看图库
+                      </Button>
+                    </CardAction>
+                  </CardHeader>
+                  <CardContent className='recent-home-content'>
+                  {images.length === 0 ? (
+                    <div className='gallery-empty'>
+                      <span>最近生成的图片会显示在这里</span>
+                    </div>
+                  ) : (
+                    <GalleryStrip
+                      images={images}
+                      limit={5}
+                      onPreview={setPreviewImage}
+                      onDownload={handleDownloadImage}
+                      onDelete={(id) => void handleDeleteImage(id)}
+                    />
+                  )}
+                  </CardContent>
+                </Card>
+
+              </div>
+
+            </section>
+          ) : null}
+
+          {isCommerceView ? (
+            <section className='commerce-page'>
+              <Card className='commerce-composer dashboard-card'>
+                <CardHeader>
+                  <CardTitle>
+                    <span className='inline-flex items-center gap-2'>
+                      <ShoppingBag size={16} />
+                      电商主题
+                    </span>
+                  </CardTitle>
+                  <CardDescription>{commerceCopy.descriptionPlaceholder}</CardDescription>
+                </CardHeader>
+                <CardContent className='dashboard-card-content'>
+                {renderCommerceKindField()}
+                <div className='commerce-upload-grid'>
+                  {renderCommerceUpload(
+                    'product',
+                    '商品白底图',
+                    `上传同一个商品的白底图，可包含多个角度，最多 ${MAX_COMMERCE_PRODUCT_IMAGES} 张。`,
+                    commerceProductImages
+                  )}
+                  {renderCommerceUpload(
+                    'style',
+                    commerceCopy.styleLabel,
+                    commerceCopy.styleHint,
+                    commerceStyleImage ? [commerceStyleImage] : []
+                  )}
+                </div>
+                {renderCommerceCategoryField()}
+                <label className='field'>
+                  <span>{commerceCopy.descriptionLabel}</span>
+                  <Textarea
+                    className='commerce-description'
+                    value={commerceDescription}
+                    onChange={(event) => setCommerceDescription(event.target.value)}
+                    placeholder={commerceCopy.descriptionPlaceholder}
+                  />
+                </label>
+                <div className='simple-param-grid commerce-param-grid'>
+                  <div className='field'>
+                    <Label>模型</Label>
+                    {renderModelSelect()}
+                  </div>
+                  {renderSizeField()}
+                  <div className='field'>
+                    <Label>质量</Label>
+                    {renderQualitySelect()}
+                  </div>
+                  <div className='field'>
+                    <Label>数量</Label>
+                    {renderCountSelect()}
+                  </div>
+                </div>
+                </CardContent>
+                <CardFooter className='simple-actions dashboard-card-footer'>
+                  <Button
+                    type='button'
+                    className='primary-action'
+                    onClick={() => void handleCommerceGenerate(commerceGenerateKind)}
+                    disabled={isGenerating || !commerceCanGenerate}
+                  >
+                    {isGenerating ? <Loader2 className='spin' size={16} /> : <Sparkles size={16} />}
+                    {isConfigured ? (isGenerating ? '生成中' : commerceCopy.action) : '先完成配置'}
+                  </Button>
+                </CardFooter>
+              </Card>
+
+            </section>
+          ) : null}
+
+          {currentView === 'gallery' ? (
+            <section className='gallery-page'>
+              <Card className='gallery-page-panel dashboard-card'>
+                <CardHeader>
+                  <CardTitle>本地图库</CardTitle>
+                  <CardDescription>
+                    把刚生成的作品铺成灵感墙，快速预览、下载和删除，集中整理本地生成结果。
+                  </CardDescription>
+                  <CardAction className='gallery-hero-stats' aria-label='图库统计'>
+                    <Badge variant='secondary'>{images.length} 张图片</Badge>
+                    <Badge variant='outline'>
+                      {images.length === 0 ? '暂无' : images[0]?.mode === 'image' ? '图生图' : '文生图'}
+                    </Badge>
+                  </CardAction>
+                </CardHeader>
+                <CardContent className='dashboard-card-content'>
+                {images.length === 0 ? (
+                  <div className='gallery-empty gallery-page-empty'>
+                    <span>生成结果会出现在这里。</span>
+                    <Button
+                      type='button'
+                      variant='secondary'
+                      onClick={() => enterConfiguredView('home')}
+                    >
+                      <Home size={16} />
+                      回到快速生成
+                    </Button>
+                  </div>
+                ) : (
+                  <GalleryStrip
+                    images={images}
+                    limit={images.length}
+                    onPreview={setPreviewImage}
+                    onDownload={handleDownloadImage}
+                    onDelete={(id) => void handleDeleteImage(id)}
+                  />
+                )}
+                </CardContent>
+              </Card>
+            </section>
+          ) : null}
+
+          {currentView === 'console' ? (
+            <section className='console-page'>
+              <div className='console-layout'>
+                <Card className='dashboard-card'>
+                  <CardHeader>
+                    <CardTitle>
+                      <span className='inline-flex items-center gap-2'>
+                        <KeyRound size={16} />
+                        连接配置
+                      </span>
+                    </CardTitle>
+                    <CardDescription>配置中转站、文本模型和生图模型。</CardDescription>
+                  </CardHeader>
+                  <CardContent className='dashboard-card-content'>
+                  <label className='field'>
+                    <span>Base URL</span>
+                    <Input
+                      value={baseUrl}
+                      onChange={(event) => setBaseUrl(event.target.value)}
+                      placeholder='https://hotapi.top'
+                      spellCheck={false}
+                    />
+                  </label>
+
+                  <div className='connection-config-block'>
+                    <div className='connection-config-title'>
+                      <Sparkles size={14} />
+                      <span>文本模型</span>
+                      <small>用于优化提示词</small>
+                    </div>
+                    <label className='field'>
+                      <span>文本模型名称</span>
+                      <Input
+                        value={textModel}
+                        onChange={(event) => setTextModel(event.target.value)}
+                        placeholder='gpt-5.5'
+                        spellCheck={false}
+                      />
+                    </label>
+                    <label className='field'>
+                      <span>文本模型 API Key</span>
+                      <Input
+                        value={codexApiKey}
+                        onChange={(event) => setCodexApiKey(event.target.value)}
+                        type='password'
+                        placeholder='sk-...'
+                        spellCheck={false}
+                      />
+                    </label>
+                  </div>
+
+                  <div className='connection-config-block'>
+                    <div className='connection-config-title'>
+                      <Sparkles size={14} />
+                      <span>生图模型</span>
+                    </div>
+                    <label className='field'>
+                      <span>生图模型名称</span>
+                      {renderModelSelect()}
+                    </label>
+                    <label className='field'>
+                      <span>生图模型 API Key</span>
+                      <Input
+                        value={apiKey}
+                        onChange={(event) => setApiKey(event.target.value)}
+                        type='password'
+                        placeholder='sk-...'
+                        spellCheck={false}
+                      />
+                    </label>
+                  </div>
+                  <label className='checkbox-row'>
+                    <Checkbox checked={persistApiKey} onCheckedChange={(checked: boolean | 'indeterminate') => setPersistApiKey(Boolean(checked))} />
+                    <span>保存 API Key 到当前浏览器，刷新后继续使用</span>
+                  </label>
+                  </CardContent>
+                  <CardFooter className='button-grid dashboard-card-footer'>
+                    <Button
+                      type='button'
+                      variant='secondary'
+                      className='secondary login-button'
+                      onClick={() => {
+                        setError('')
+                        setLoginBaseUrl(baseUrl)
+                        setLoginImageModel(model || DEFAULT_MODEL)
+                        setLoginCodexModel(textModel || DEFAULT_TEXT_MODEL)
+                        setIsLoginDialogOpen(true)
+                      }}
+                    >
+                      <LogIn size={16} />
+                      登录
+                    </Button>
+                    <Button type='button' variant='secondary' className='secondary' onClick={handleSaveSettings}>
+                      <Save size={16} />
+                      保存设置
+                    </Button>
+                    <Button
+                      type='button'
+                      variant='secondary'
+                      className='secondary'
+                      onClick={handleFetchModels}
+                      disabled={isLoadingModels || !baseUrl || !apiKey}
+                    >
+                      {isLoadingModels ? (
+                        <Loader2 className='spin' size={16} />
+                      ) : (
+                        <RefreshCw size={16} />
+                      )}
+                      获取模型
+                    </Button>
+                  </CardFooter>
+                </Card>
+
+                <Card className='compact-panel dashboard-card'>
+                  <CardHeader>
+                    <CardTitle>
+                      <span className='inline-flex items-center gap-2'>
+                        <Download size={16} />
+                        本地数据
+                      </span>
+                    </CardTitle>
+                    <CardDescription>
+                      图片和设置保存在当前浏览器 IndexedDB，备份文件不包含 API Key。
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className='dashboard-card-content'>
+                  <div className='button-grid'>
+                    <Button type='button' variant='secondary' className='secondary' onClick={() => void handleExportBackup()}>
+                      <Download size={16} />
+                      导出备份
+                    </Button>
+                    <label className='secondary file-action'>
+                      <Upload size={16} />
+                      导入备份
+                      <input
+                        type='file'
+                        accept='application/json,.json'
+                        onChange={(event) => {
+                          const file = event.target.files?.[0]
+                          if (file) void handleImportBackup(file)
+                          event.currentTarget.value = ''
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <Button
+                    type='button'
+                    variant='destructive'
+                    className='ghost danger'
+                    onClick={() => void handleClearImages()}
+                    disabled={images.length === 0}
+                  >
+                    <Trash2 size={16} />
+                    清空图库
+                  </Button>
+                  <p>
+                    生成任务先提交到服务器后台，结果会短暂缓存在服务器再同步到本地图库。
+                  </p>
+                  </CardContent>
+                </Card>
+              </div>
+            </section>
+          ) : null}
+
+          {error ? (
+            <div className='error-toast portal-error' role='alert'>
+              <strong>执行失败</strong>
+              <span>{error}</span>
+              <Button type='button' variant='ghost' size='icon' onClick={() => setError('')} aria-label='关闭错误提示'>
+                <X size={15} />
+              </Button>
+            </div>
+          ) : null}
+          </main>
+        </SidebarInset>
+      </SidebarProvider>
+      )}
+
+      <Dialog
+        open={isLoginDialogOpen}
+        onOpenChange={(open) => {
+          if (!isNewApiLoggingIn) setIsLoginDialogOpen(open)
+        }}
+      >
+        <DialogContent className='login-dialog'>
+          <DialogHeader>
+            <DialogTitle>登录中转站</DialogTitle>
+            <DialogDescription>自动获取生图和提示词优化所需的两个分组秘钥。</DialogDescription>
+          </DialogHeader>
+          <form
+            className='dialog-form'
+            onSubmit={(event) => {
+              event.preventDefault()
+              void handleNewApiLogin()
+            }}
+          >
+            <div className='field'>
+              <Label htmlFor='login-base-url'>中转站</Label>
+              <Input
+                id='login-base-url'
+                value={loginBaseUrl}
+                onChange={(event) => setLoginBaseUrl(event.target.value)}
+                disabled={isNewApiLoggingIn}
+                placeholder='https://your-openai-compatible-host'
+                spellCheck={false}
+              />
+            </div>
+            <div className='field'>
+              <Label htmlFor='login-username'>账号</Label>
+              <Input
+                id='login-username'
+                value={loginUsername}
+                onChange={(event) => setLoginUsername(event.target.value)}
+                autoComplete='username'
+                disabled={isNewApiLoggingIn}
+                placeholder='用户名或邮箱'
+              />
+            </div>
+            <div className='field'>
+              <Label htmlFor='login-password'>密码</Label>
+              <Input
+                id='login-password'
+                value={loginPassword}
+                onChange={(event) => setLoginPassword(event.target.value)}
+                type='password'
+                autoComplete='current-password'
+                disabled={isNewApiLoggingIn}
+                placeholder='中转站密码'
+              />
+            </div>
+            <div className='field'>
+              <Label htmlFor='login-image-group'>生图分组</Label>
+              <Input
+                id='login-image-group'
+                value={loginImageGroup}
+                onChange={(event) => setLoginImageGroup(event.target.value)}
+                disabled={isNewApiLoggingIn}
+                placeholder='gpt-image-2 生图低价'
+              />
+            </div>
+            <div className='field'>
+              <Label htmlFor='login-image-model'>生图模型</Label>
+              <Input
+                id='login-image-model'
+                value={loginImageModel}
+                onChange={(event) => setLoginImageModel(event.target.value)}
+                disabled={isNewApiLoggingIn}
+                placeholder='gpt-image-2'
+              />
+            </div>
+            <div className='field'>
+              <Label htmlFor='login-image-token-name'>生图 Token 名称</Label>
+              <Input
+                id='login-image-token-name'
+                value={loginImageTokenName}
+                onChange={(event) => setLoginImageTokenName(event.target.value)}
+                disabled={isNewApiLoggingIn}
+                placeholder='GPT Image Tools - image'
+              />
+            </div>
+            <div className='field'>
+              <Label htmlFor='login-codex-group'>文本分组</Label>
+              <Input
+                id='login-codex-group'
+                value={loginCodexGroup}
+                onChange={(event) => setLoginCodexGroup(event.target.value)}
+                disabled={isNewApiLoggingIn}
+                placeholder='codex 满血高速'
+              />
+            </div>
+            <div className='field'>
+              <Label htmlFor='login-codex-model'>文本模型</Label>
+              <Input
+                id='login-codex-model'
+                value={loginCodexModel}
+                onChange={(event) => setLoginCodexModel(event.target.value)}
+                disabled={isNewApiLoggingIn}
+                placeholder='gpt-5.5'
+              />
+            </div>
+            <div className='field'>
+              <Label htmlFor='login-codex-token-name'>文本 Token 名称</Label>
+              <Input
+                id='login-codex-token-name'
+                value={loginCodexTokenName}
+                onChange={(event) => setLoginCodexTokenName(event.target.value)}
+                disabled={isNewApiLoggingIn}
+                placeholder='GPT Image Tools - text'
+              />
+            </div>
+            <p>
+              账号密码只用于本次登录中转站；服务端不保存。成功后仅把生图和 Codex API Key 保存到当前浏览器。
+            </p>
+            <DialogFooter>
+              <Button type='button' variant='ghost' onClick={() => setIsLoginDialogOpen(false)} disabled={isNewApiLoggingIn}>
+                取消
+              </Button>
+              <Button
+                type='submit'
+                variant='secondary'
+                disabled={
+                  isNewApiLoggingIn ||
+                  !loginBaseUrl.trim() ||
+                  !loginUsername.trim() ||
+                  !loginPassword ||
+                  !loginImageGroup.trim() ||
+                  !loginImageModel.trim() ||
+                  !loginImageTokenName.trim() ||
+                  !loginCodexGroup.trim() ||
+                  !loginCodexModel.trim() ||
+                  !loginCodexTokenName.trim()
+                }
+              >
+                {isNewApiLoggingIn ? <Loader2 className='spin' size={16} /> : <LogIn size={16} />}
+                登录并获取秘钥
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(previewImage)} onOpenChange={(open) => !open && setPreviewImage(null)}>
+        <DialogContent className='preview-dialog'>
+          {previewImage ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>{previewImage.model}</DialogTitle>
+                <DialogDescription>
+                  {previewImage.size} · {previewImage.quality} ·{' '}
+                  {new Date(previewImage.createdAt).toLocaleString()}
+                </DialogDescription>
+              </DialogHeader>
+              <div className='preview-frame'>
+                <img
+                  src={previewImage.src}
+                  alt={previewImage.revisedPrompt || previewImage.prompt}
+                />
+              </div>
+              <p>{previewImage.revisedPrompt || previewImage.prompt}</p>
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}

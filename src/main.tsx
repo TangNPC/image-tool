@@ -1,0 +1,21 @@
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import { App } from './App'
+import { Toaster } from './components/ui/sonner'
+import '@xyflow/react/dist/style.css'
+import './styles.css'
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <Toaster richColors position='top-right' />
+    <App />
+  </React.StrictMode>
+)
+
+if (process.env.NODE_ENV === 'production' && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {
+      // Offline support is optional; the app still works without registration.
+    })
+  })
+}
